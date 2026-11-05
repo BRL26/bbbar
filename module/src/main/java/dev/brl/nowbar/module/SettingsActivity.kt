@@ -317,9 +317,8 @@ class SettingsActivity : AppCompatActivity() {
         val slider = Slider(this).apply {
             valueFrom = 0f
             valueTo = MAX_DP.toFloat()
-            stepSize = 1f
+            // No stepSize on purpose: stepSize = 1 over 0…1000 draws a thousand tick marks.
             value = start.toFloat()
-            // No stepSize: a 1 dp step over 0…1000 draws a thousand tick marks on the track.
             contentDescription = title
             addOnChangeListener { _, v, fromUser ->
                 if (!fromUser) return@addOnChangeListener

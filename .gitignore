@@ -1,0 +1,18 @@
+# Gradle / Android build output
+.gradle/
+build/
+module/build/
+module/release/
+local.properties
+captures/
+*.apk
+*.aab
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Logs and scratch files from device runs
+*.log
+logs/

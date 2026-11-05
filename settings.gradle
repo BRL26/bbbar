@@ -1,0 +1,20 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
+    repositories {
+        google()
+        mavenCentral()
+        // XposedBridge / classic Xposed API used by LSPosed modules.
+        maven { url = uri("https://api.xposed.info/") }
+    }
+}
+
+rootProject.name = "NowBar"
+include ':module'

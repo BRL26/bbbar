@@ -1,0 +1,45 @@
+plugins {
+    // AGP 9 compiles Kotlin itself; no separate Kotlin Gradle plugin is allowed.
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.brl.nowbar.module'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'dev.brl.nowbar.module'
+        minSdk 31
+        targetSdk 37
+        versionCode 1
+        versionName '0.1.0-m1'
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // The Xposed API is provided by the framework at runtime; never package it.
+    packaging {
+        resources {
+            excludes += ['META-INF/*.kotlin_module']
+        }
+    }
+}
+
+dependencies {
+    // No Xposed/LSPosed API: the pill is a plain overlay window owned by this app.
+    // Material 3 for the settings screen (Material You colours come from the wallpaper).
+    implementation 'androidx.appcompat:appcompat:1.8.0'
+    implementation 'com.google.android.material:material:1.14.0'
+}

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 baseline theme: colours come from the wallpaper at runtime via
+         DynamicColors (Material You), so there is nothing to hardcode here. -->
+    <style name="Theme.BBBar" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application
+        android:name=".NowBarApp"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BBBar">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.BBBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Instant unlock trigger: protected system broadcast, no permission needed. -->
+        <receiver
+            android:name=".UserPresentReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- exported=true only while tuning: lets adb push values for testing. -->
+        <receiver
+            android:name=".TuningReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.brl.nowbar.module.SET" />
+            </intent-filter>
+        </receiver>
+
+        <!-- exported=true only while tuning: lets adb start/stop it for testing. -->
+        <service
+            android:name=".NowBarA11yService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nowbar_a11y" />
+        </service>
+
+        <service
+            android:name=".TunerService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse" />
+
+        <service
+            android:name=".OverlayService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="nowbar_overlay" />
+        </service>
+    </application>
+
+</manifest>

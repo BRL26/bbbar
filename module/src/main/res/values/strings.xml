@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">bbbar</string>
+    <string name="settings_subtitle">Now Bar for Nothing OS</string>
+    <string name="a11y_description">Draws the bbbar pill above the lock screen and apps. It does not read screen content.</string>
+</resources>

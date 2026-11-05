@@ -2,6 +2,29 @@
 
 Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing OS 5.0 / Android 17).
 
+## Pick up here (next session)
+
+The app is switched **off** for the night but still installed: accessibility service disabled, all
+processes stopped, no windows left on screen. Nothing else was changed on the phone.
+
+Turn it back on with either
+
+- **Settings → Accessibility → bbbar → Use bbbar**, or
+- adb:
+
+  ```bash
+  adb shell settings put secure enabled_accessibility_services \
+      dev.brl.nowbar.module/dev.brl.nowbar.module.NowBarA11yService
+  adb shell settings put secure accessibility_enabled 1
+  ```
+
+No other permission is needed: the lock-screen pill needs only the accessibility service, and the
+root keyguard watcher starts with it (Magisk already has the grant).
+
+First thing to look at tomorrow: whether the AOD → unlock handover is now animated on a real
+fingerprint unlock. The logs prove the sequence runs (`display awake after Nms, sliding after two
+frames` → `lock pill sliding up`), but the visual result still needs your eyes.
+
 ## Repo and naming
 
 - [x] Repo `bbbar` created on GitHub; this project is now named **bbbar**
@@ -20,6 +43,14 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 - [x] Tap-outside dismissal for both surfaces (full-screen catcher window)
 - [x] Lock pill expands to 2.5× (width clamped to the screen)
 - [x] Unlock/lock handover slides instead of waiting for a poll
+- [x] Screen off is handled on `ACTION_SCREEN_OFF` itself, not when the keyguard finally reports
+      itself locked (`screen off: status pill sliding up`, lock pill already in place)
+- [x] Lock pill window is TOP gravity from the moment it is created, so the unlock slide is a
+      pure y animation — flipping gravity mid-slide relaid the window out and tore the pill
+- [x] Unlock from the AOD waits for the display to be interactive, then two rendered frames,
+      before sliding (starting on the first drawn frame dropped frames and looked like a tear)
+- [x] Outside tap closes an expansion, taps inside no longer do: the full-screen catcher window
+      is gone, the pill windows use `FLAG_WATCH_OUTSIDE_TOUCH` + `ACTION_OUTSIDE`
 - [x] Root keyguard watcher (`su -c logcat …`) with an 8 ms confirmation poll
 - [x] Material 3 settings screen, Material You colours, live preview, 0–1000 dp sliders
 
@@ -82,8 +113,11 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 - **No LSPosed module.** The plan called for one, but LSPosed fell back to safe mode after
   repeated SystemUI restarts, so the pill is an accessibility overlay. Everything below the pill
   works without touching SystemUI.
-- **AOD is not covered.** The pill is drawn while the keyguard is up; a true always-on-display
-  variant needs a window that survives dozing, which has not been attempted.
+- **AOD is not covered.** The pill is drawn while the keyguard is up, but our
+  `TYPE_ACCESSIBILITY_OVERLAY` window is not composited while the display dozes: a screencap of
+  the AOD shows only the fingerprint ring where the pill should be. Both handovers are therefore
+  timed against the *display* (`SCREEN_OFF`, `isInteractive`), never against the doze screen. A
+  real AOD pill needs a window type that survives dozing, which has not been attempted.
 - **`KeyguardManager.addKeyguardLockedStateListener` throws** on this build
   (`enforceSubscribeToKeyguardLockedStatePermission`), hence the root logcat watcher.
 - **Root overlay daemon** (`RootOverlayDaemon`) is kept for reference: WindowManager rejects its

@@ -15,7 +15,9 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -89,9 +91,6 @@ class NowBarA11yService : AccessibilityService() {
     private var popupPill: PillView? = null
     private var popupParams: WindowManager.LayoutParams? = null
     private var popupAnimator: ValueAnimator? = null
-
-    private var catcher: View? = null
-    private var catcherParams: WindowManager.LayoutParams? = null
 
     private var receiver: BroadcastReceiver? = null
     private var keyguardListener: KeyguardManager.KeyguardLockedStateListener? = null
@@ -233,7 +232,6 @@ class NowBarA11yService : AccessibilityService() {
         } catch (t: Throwable) {
         }
         if (NowBarBridge.service === this) NowBarBridge.service = null
-        hideCatcher()
         removePopup()
         removeLockPill()
         removeSbPill()
@@ -339,7 +337,6 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val locked = isKeyguardLocked()
             lastLocked = locked
-            hideCatcher()
             Log.i("surfaces: keyguardLocked=$locked")
             if (transitioning) return
             if (locked) {
@@ -366,9 +363,18 @@ class NowBarA11yService : AccessibilityService() {
             if (receiver != null) return
             val r = object : BroadcastReceiver() {
                 override fun onReceive(context: Context?, intent: Intent?) {
-                    Log.i("state broadcast: ${intent?.action}")
-                    if (intent?.action == Intent.ACTION_SCREEN_ON) armBurst()
-                    updateSurfaces()
+                    val action = intent?.action
+                    Log.i("state broadcast: $action")
+                    when (action) {
+                        // Screen off is handled directly: the keyguard only reports itself locked
+                        // a few hundred ms later, by which time the display is already in doze
+                        // and nothing we draw is visible.
+                        Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                        else -> {
+                            if (action == Intent.ACTION_SCREEN_ON) armBurst()
+                            updateSurfaces()
+                        }
+                    }
                 }
             }
             val filter = IntentFilter().apply {
@@ -385,8 +391,89 @@ class NowBarA11yService : AccessibilityService() {
 
     // ----------------------------------------------------------- transitions
 
-    /** Unlock: the keyguard pill slides up off the top, the status pill slides in from there. */
+    /**
+     * Unlock: the keyguard pill slides up off the top, the status pill slides in from there.
+     *
+     * Unlocking from the AOD is the awkward case: the fingerprint fires while the display is
+     * still dozing, and window moves sent during the doze exit are dropped by the system, so the
+     * pill used to vanish in two pieces with no animation. Wait for the display to be
+     * interactive, then slide.
+     */
     private fun transitionToUnlocked() {
+        if (!isInteractive()) {
+            Log.i("unlock from doze: waiting for the display to wake before sliding")
+            awaitInteractive(0)
+            return
+        }
+        slideLockPillOut()
+    }
+
+    private fun isInteractive(): Boolean = try {
+        getSystemService(PowerManager::class.java)?.isInteractive ?: true
+    } catch (t: Throwable) {
+        Log.w("interactivity unreadable, assuming awake", t)
+        true
+    }
+
+    /** Checks every frame until the display is awake (max ~400 ms), then slides. */
+    private fun awaitInteractive(attempt: Int) {
+        try {
+            if (isInteractive() || attempt >= 25) {
+                Log.i("display awake after ${attempt * 16}ms, sliding after two frames")
+                // Two frames of grace: starting the slide on the very first frame the display
+                // draws again drops those frames, which reads as the pill being torn in half
+                // instead of sliding.
+                waitForFrames(2)
+                return
+            }
+            handler.postDelayed({ awaitInteractive(attempt + 1) }, 16L)
+        } catch (t: Throwable) {
+            Log.w("awaitInteractive failed", t)
+            slideLockPillOut()
+        }
+    }
+
+    private fun waitForFrames(remaining: Int) {
+        if (remaining <= 0) {
+            slideLockPillOut()
+            return
+        }
+        try {
+            Choreographer.getInstance().postFrameCallback { waitForFrames(remaining - 1) }
+        } catch (t: Throwable) {
+            Log.w("frame wait failed", t)
+            slideLockPillOut()
+        }
+    }
+
+    /**
+     * Screen off: hand over now instead of waiting for the keyguard to report itself locked.
+     * The display fades out over the next few hundred ms, so the status pill's slide is still
+     * drawn; when the handover waited for the keyguard it ran in doze, where nothing renders.
+     */
+    private fun onScreenOff() {
+        try {
+            removePopup()
+            lastLocked = true
+            // The lock pill goes in first, so it is already there while the status pill leaves.
+            if (lockPill == null) addLockPill(slideIn = false)
+            val pill = sbPill
+            val lp = sbParams
+            if (pill == null || lp == null) return
+            transitioning = true
+            animateY(pill, lp, lp.y, -lp.height, SLIDE_MS, PathInterpolator(0.2f, 0f, 0f, 1f)) {
+                removeSbPill()
+                transitioning = false
+                Log.i("screen off: status pill slid away, lock pill already in place")
+            }
+            Log.i("screen off: status pill sliding up (y ${lp.y} -> ${-lp.height})")
+        } catch (t: Throwable) {
+            Log.w("onScreenOff failed", t)
+            transitioning = false
+        }
+    }
+
+    private fun slideLockPillOut() {
         val lock = lockPill
         val lp = lockParams
         if (lock == null || lp == null) {
@@ -395,10 +482,9 @@ class NowBarA11yService : AccessibilityService() {
         }
         try {
             transitioning = true
-            val screenH = screenHeightPx()
-            val topY = screenH - lp.y - lp.height
-            lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            lp.y = topY
+            // No gravity change here: the window has been TOP gravity since it was added, so the
+            // slide is a pure y animation and nothing relayouts mid-flight.
+            val topY = lp.y
             animateY(lock, lp, topY, -lp.height, SLIDE_MS, PathInterpolator(0.2f, 0f, 0f, 1f)) {
                 removeLockPill()
                 transitioning = false
@@ -476,37 +562,46 @@ class NowBarA11yService : AccessibilityService() {
     private fun addLockPill(slideIn: Boolean = false) {
         try {
             if (lockPill != null) return
+            val tuning = Tuning.current(this)
             val view = PillView(this).apply {
-                setOnClickListener { toggleLockExpand() }
+                // Collapsed: a tap opens the expansion. Expanded: taps belong to the controls.
+                setOnClickListener { if (!lockExpanded) toggleLockExpand() }
             }
-            val targetY = dp(TuningStore.DEFAULT_BOTTOM_DP)
+            val w = dp(tuning.widthDp)
+            val h = dp(tuning.heightDp)
+            val targetY = lockTopY(tuning.bottomDp, h)
+            // TOP gravity from the very first frame. Flipping gravity mid-animation makes
+            // WindowManager recompute the window frame, which is what tore the pill in half
+            // when unlocking out of the AOD.
             val lp = WindowManager.LayoutParams(
-                dp(TuningStore.DEFAULT_WIDTH_DP),
-                dp(TuningStore.DEFAULT_HEIGHT_DP),
+                w,
+                h,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 overlayFlags(),
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                y = if (slideIn) -dp(TuningStore.DEFAULT_HEIGHT_DP) else targetY
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = if (slideIn) screenHeightPx() else targetY
             }
             windowManager.addView(view, lp)
             lockPill = view
             lockParams = lp
             lockExpanded = false
-            applyLockTuning()
+            view.setStyle(tuning)
             if (slideIn) {
                 animateY(view, lp, lp.y, targetY, SLIDE_MS, DecelerateInterpolator(1.6f), null)
                 Log.i("lock pill sliding in from the bottom")
+            } else {
+                lp.y = targetY
+                windowManager.updateViewLayout(view, lp)
             }
-            Log.i("lock pill added")
+            Log.i("lock pill added: ${w}x${h}px at y=$targetY (top gravity)")
         } catch (t: Throwable) {
             Log.e("a11y addLockPill failed", t)
         }
     }
 
     private fun removeLockPill() {
-        hideCatcher()
         lockAnimator?.cancel()
         lockAnimator = null
         lockExpanded = false
@@ -529,7 +624,7 @@ class NowBarA11yService : AccessibilityService() {
             val target = lockTargetSize(t, lockExpanded)
             lp.width = target.w
             lp.height = target.h
-            lp.y = dp(t.bottomDp)
+            lp.y = lockTopY(t.bottomDp, target.h)
             view.setStyle(t)
             windowManager.updateViewLayout(view, lp)
             Log.i("lock pill updated: ${lp.width}x${lp.height}px expanded=$lockExpanded y=${lp.y}px")
@@ -571,17 +666,26 @@ class NowBarA11yService : AccessibilityService() {
                 }
                 addUpdateListener {
                     val f = it.animatedValue as Float
-                    lp.width = (fromW + (target.w - fromW) * f).toInt()
-                    lp.height = (fromH + (target.h - fromH) * f).toInt()
+                    val w = (fromW + (target.w - fromW) * f).toInt()
+                    val h = (fromH + (target.h - fromH) * f).toInt()
+                    lp.width = w
+                    lp.height = h
+                    // With TOP gravity the bottom edge has to be held manually while it grows.
+                    lp.y = lockTopY(t.bottomDp, h)
                     try {
                         windowManager.updateViewLayout(view, lp)
-                    } catch (t: Throwable) {
+                    } catch (t2: Throwable) {
                     }
                 }
             }
             lockAnimator = anim
             anim.start()
-            if (expanding) showCatcher() else hideCatcher()
+            // Only a tap outside the expansion closes it; taps inside belong to the controls.
+            view.onOutsideTouch = if (expanding) {
+                { if (lockExpanded) toggleLockExpand() }
+            } else {
+                null
+            }
             view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
             Log.i("lock pill ${if (expanding) "expanded" else "collapsed"}: ${target.w}x${target.h}px")
         } catch (t: Throwable) {
@@ -674,60 +778,12 @@ class NowBarA11yService : AccessibilityService() {
         return if (cut > 0) cut + dp(8) else dp(16)
     }
 
-    // --------------------------------------------------------------- catcher
+    // ------------------------------------------------------------- dismissal
 
-    /**
-     * Full-screen transparent catcher: while an expansion is open, a tap anywhere that is not
-     * the expanded view lands here and closes it. Added last, so it also sits above the pill.
-     */
-    private fun showCatcher() {
-        try {
-            if (catcher != null) return
-            val v = View(this).apply {
-                isClickable = true
-                setOnClickListener { dismissExpanded() }
-            }
-            val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                overlayFlags(),
-                PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.START }
-            windowManager.addView(v, lp)
-            catcher = v
-            catcherParams = lp
-            Log.i("catcher added")
-        } catch (t: Throwable) {
-            Log.w("catcher add failed", t)
-        }
-    }
-
-    private fun hideCatcher() {
-        val v = catcher ?: return
-        try {
-            windowManager.removeView(v)
-        } catch (t: Throwable) {
-            Log.w("catcher remove failed", t)
-        }
-        catcher = null
-        catcherParams = null
-        Log.i("catcher removed")
-    }
-
-    private fun dismissExpanded() {
-        try {
-            if (popupPill != null) {
-                collapseToSbPill()
-            } else if (lockExpanded) {
-                toggleLockExpand()
-            } else {
-                hideCatcher()
-            }
-        } catch (t: Throwable) {
-            Log.w("dismiss failed", t)
-        }
-    }
+    // Dismissal used to be a full-screen transparent catcher window added above everything.
+    // That window sat above the expansion itself, so tapping the pill closed it. The windows now
+    // carry FLAG_WATCH_OUTSIDE_TOUCH and handle ACTION_OUTSIDE instead: taps inside reach the
+    // pill (its controls), taps outside arrive as ACTION_OUTSIDE and close the expansion.
 
     // ---------------------------------------------------------------- popup
 
@@ -762,7 +818,8 @@ class NowBarA11yService : AccessibilityService() {
 
             val view = PillView(this).apply {
                 setStyle(pop.label, pop.textDp, pop.radiusDp)
-                setOnClickListener { collapseToSbPill() }
+                // Taps inside the popup are for its controls; an outside tap closes it.
+                onOutsideTouch = { collapseToSbPill() }
             }
             val lp = WindowManager.LayoutParams(
                 start.w,
@@ -780,7 +837,6 @@ class NowBarA11yService : AccessibilityService() {
             popupPill = view
             popupParams = lp
             animatePopupRect(view, lp, start, target, OvershootInterpolator(1.08f), EXPAND_MS, null)
-            showCatcher()
             Log.i(
                 "popup expanding from pill ${start.w}x${start.h} at ${start.x},${start.y} " +
                     "to ${target.w}x${target.h} at ${target.x},${target.y}"
@@ -794,7 +850,6 @@ class NowBarA11yService : AccessibilityService() {
         val view = popupPill ?: return
         val lp = popupParams ?: return
         try {
-            hideCatcher()
             val start = Rect4(lp.x, lp.y, lp.width, lp.height)
             val pill = pillRect()
             animatePopupRect(view, lp, start, pill, AccelerateDecelerateInterpolator(), COLLAPSE_MS) {
@@ -807,7 +862,6 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     private fun removePopup() {
-        hideCatcher()
         popupAnimator?.cancel()
         popupAnimator = null
         val view = popupPill ?: return
@@ -878,6 +932,7 @@ class NowBarA11yService : AccessibilityService() {
     private fun overlayFlags(): Int =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
 
@@ -906,6 +961,10 @@ class NowBarA11yService : AccessibilityService() {
         Log.w("screen width unreadable", t)
         resources.displayMetrics.widthPixels
     }
+
+    /** Window y for a lock pill of [heightPx] whose bottom edge sits [bottomDp] above the bottom. */
+    private fun lockTopY(bottomDp: Int, heightPx: Int): Int =
+        screenHeightPx() - dp(bottomDp) - heightPx
 
     private fun screenHeightPx(): Int = try {
         windowManager.currentWindowMetrics.bounds.height()

@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.text.TextPaint
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
 
@@ -41,6 +42,14 @@ class PillView(context: Context) : View(context) {
     private var label = TuningStore.DEFAULT_LABEL
     private var radiusOverrideDp = 0f
     private var loggedFirstDraw = false
+
+    /**
+     * Fired when the user taps anywhere outside this window. Needs
+     * [WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH] on the window; taps *inside* the
+     * window never trigger it, which is what separates "tap outside to close" from
+     * "tap the thing itself to close".
+     */
+    var onOutsideTouch: (() -> Unit)? = null
 
     /** Applies tuning values: label, text size and corner radius (0 = full pill). */
     fun setStyle(values: Tuning.Values) = setStyle(values.label, values.textDp, values.radiusDp)
@@ -79,6 +88,18 @@ class PillView(context: Context) : View(context) {
         } catch (t: Throwable) {
             Log.w("PillView.onDraw threw", t)
         }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        try {
+            if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                onOutsideTouch?.invoke()
+                return true
+            }
+        } catch (t: Throwable) {
+            Log.w("PillView.onTouchEvent threw", t)
+        }
+        return super.onTouchEvent(event)
     }
 
     private fun dp(v: Float): Float = v * resources.displayMetrics.density

@@ -16,4 +16,13 @@ object NowBarBridge {
             Log.w("userPresent dispatch failed", t)
         }
     }
+
+    /** Asks the running service to re-read every setting right now. */
+    fun reload() {
+        try {
+            service?.reloadNow()
+        } catch (t: Throwable) {
+            Log.w("reload dispatch failed", t)
+        }
+    }
 }

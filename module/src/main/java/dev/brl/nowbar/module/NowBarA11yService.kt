@@ -60,20 +60,60 @@ class NowBarA11yService : AccessibilityService() {
         /** Failsafe poll while the phone is unlocked. */
         const val POLL_MS = 1000L
 
-        /** While the keyguard is showing, poll fast so an unlock is caught within ~150 ms. */
-        const val FAST_POLL_MS = 150L
+        /** While the keyguard is showing and the screen is on, poll every frame-ish interval. */
+        const val FAST_POLL_MS = 40L
 
         /** After the screen comes on, check hard for this long (fingerprint unlocks land here). */
         const val BURST_MS = 5000L
 
         /** Delay used during a burst: effectively "as fast as is sane". */
-        const val BURST_POLL_MS = 60L
+        const val BURST_POLL_MS = 40L
+
+        /** While the display is off there is nothing to update, so back right off. */
+        const val DOZE_POLL_MS = 800L
+
+        /**
+         * Gap between the status pill leaving and the keyguard pill arriving. The screen-off
+         * animation runs for roughly this long, so landing the pill inside it looks like a jump;
+         * bar-pill-off -> delay -> lock-pill-on reads as one movement.
+         */
+        const val SCREEN_OFF_LOCK_DELAY_MS = 450L
 
         /** While a root keyguard signal is pending confirmation, check this often (one frame). */
         const val CONFIRM_POLL_MS = 8L
 
         /** Give up on a root signal that never turns into a keyguard change after this long. */
         const val CONFIRM_MS = 1500L
+
+        /** How long the lagging `isKeyguardLocked` flag is ignored after ACTION_USER_PRESENT. */
+        const val TRUST_MS = 800L
+
+        /**
+         * SystemUI's own words for "the keyguard is going away". These lines are printed while the
+         * keyguard is still animating out, i.e. before `isKeyguardLocked` flips, so acting on them
+         * is the earliest any outside process can react. Matched case-insensitively.
+         */
+        val UNLOCK_WORDS = arrayOf(
+            "going away",
+            "keyguardgoingaway",
+            "startkeyguardexitanimation",
+            "keyguard exit",
+            "hide keyguard",
+            "keyguard hidden",
+            "onkeyguardshowingchanged( showing=false",
+            "keyguardshowing: false",
+            "occluded=true"
+        )
+
+        /** SystemUI's words for "the keyguard is closing over the screen again". */
+        val LOCK_WORDS = arrayOf(
+            "onstartedgoingtosleep",
+            "going to sleep",
+            "locknow",
+            "keyguardshowing: true",
+            "occluded=false",
+            "showing=true"
+        )
     }
 
     private lateinit var windowManager: WindowManager
@@ -85,12 +125,23 @@ class NowBarA11yService : AccessibilityService() {
     private var lockExpanded = false
     private var lockAnimator: ValueAnimator? = null
 
+    /**
+     * The card the user swiped to the front. Ranking still decides the default order; this is the
+     * one selection shared by every surface, so swiping on the lock pill also decides what the
+     * status bar pill shows.
+     */
+    private var frontKey: String? = null
+
     private var sbPill: PillView? = null
     private var sbParams: WindowManager.LayoutParams? = null
+    private var sbAnimator: ValueAnimator? = null
 
     private var popupPill: PillView? = null
     private var popupParams: WindowManager.LayoutParams? = null
     private var popupAnimator: ValueAnimator? = null
+
+    /** Consecutive "unlocked" reads; one alone is not trusted on this build. */
+    private var unlockStreak = 0
 
     private var receiver: BroadcastReceiver? = null
     private var keyguardListener: KeyguardManager.KeyguardLockedStateListener? = null
@@ -98,6 +149,9 @@ class NowBarA11yService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var lastLocked: Boolean? = null
+
+    /** Guards [applyContent] against the add* helpers calling back into it. */
+    private var applyingContent = false
 
     /** uptimeMillis until which the poll runs at BURST_POLL_MS. */
     private var burstUntil = 0L
@@ -111,18 +165,92 @@ class NowBarA11yService : AccessibilityService() {
     /** uptimeMillis of the last root line, so a burst is logged once instead of thirty times. */
     private var lastSignalAt = 0L
 
+    /** uptimeMillis until which the platform's lagging keyguard flag is ignored. */
+    private var trustedUnlockUntil = 0L
+
+    /** uptimeMillis of the trusted USER_PRESENT, for the lag report. */
+    private var trustedUnlockAt = 0L
+
+    /** uptimeMillis of a root-forced unlock, for the "flag finally agreed" measurement. */
+    private var rootForcedAt = 0L
+
+    /** uptimeMillis of the last SCREEN_OFF, so a lagging "unlocked" read cannot undo the lock. */
+    private var lastScreenOffAt = 0L
+
+    /** uptimeMillis of the last completed handover, to swallow duplicated triggers. */
+    private var lastHandoverAt = 0L
+
+    /** Places the keyguard pill once the screen-off animation has finished. */
+    private val showLockPillAfterScreenOff = object : Runnable {
+        override fun run() {
+            try {
+                if (lastLocked != true) return
+                if (lockPill == null) addLockPill(slideIn = false)
+                Log.i("screen off: lock pill placed after the ${SCREEN_OFF_LOCK_DELAY_MS}ms delay")
+            } catch (t: Throwable) {
+                Log.w("deferred lock pill failed", t)
+            }
+        }
+    }
+
+    /** Re-renders the visible pill once a second, so a timer counts down between updates. */
+    private val timerTick = object : Runnable {
+        override fun run() {
+            try {
+                applyContent()
+            } catch (t: Throwable) {
+                Log.w("timer tick failed", t)
+            }
+            handler.postDelayed(this, 1000L)
+        }
+    }
+
     private val keyguardPoll = object : Runnable {
         override fun run() {
             var delay = POLL_MS
             try {
                 val locked = isKeyguardLocked()
-                if (lastLocked != locked) {
-                    Log.i("poll caught the lock change (locked=$locked)")
-                    updateSurfaces()
+                val t = SystemClock.uptimeMillis()
+                if (t < trustedUnlockUntil && locked) {
+                    // The platform flag is still catching up. ACTION_USER_PRESENT already said
+                    // the keyguard is gone, so do not undo that flip with the lag.
+                } else {
+                    if (rootForcedAt > 0L && !locked) {
+                        Log.i(
+                            "keyguard flag agreed ${t - rootForcedAt}ms after the root unlock " +
+                                "signal (that gap was pure reaction time before)"
+                        )
+                        rootForcedAt = 0L
+                    }
+                    if (trustedUnlockAt > 0L && !locked) {
+                        Log.i("keyguard flag agreed ${t - trustedUnlockAt}ms after USER_PRESENT")
+                        trustedUnlockAt = 0L
+                        trustedUnlockUntil = 0L
+                    }
+                    // A single "unlocked" read cannot be trusted on this build: the flag reports
+                    // false for a moment while the keyguard is still up, and acting on it tore
+                    // the lockscreen pill off a locked phone. Two consecutive reads, with the
+                    // display awake, are required - at a 40 ms poll that is still under 100 ms.
+                    val awake = isInteractive()
+                    val settledAfterScreenOff = t - lastScreenOffAt > 1000L
+                    if (!locked && awake && settledAfterScreenOff) {
+                        unlockStreak++
+                    } else if (locked) {
+                        unlockStreak = 0
+                    }
+                    // 8 reads at the 40 ms locked cadence is ~320 ms of continuous "unlocked".
+                    // Two reads (80 ms) was short enough for the mid-transition false reads to
+                    // fake it, which is what made the pill unlock, relock, then unlock again.
+                    val unlockedConfirmed = !locked && unlockStreak >= 8
+                    if (lastLocked != locked && (locked || unlockedConfirmed)) {
+                        Log.i("poll caught the lock change (locked=$locked, unlockStreak=$unlockStreak)")
+                        updateSurfaces()
+                    }
                 }
-                val now = SystemClock.uptimeMillis()
+                val now = t
                 delay = when {
                     now < burstUntil -> BURST_POLL_MS
+                    !isInteractive() -> DOZE_POLL_MS
                     locked -> FAST_POLL_MS
                     else -> POLL_MS
                 }
@@ -141,6 +269,10 @@ class NowBarA11yService : AccessibilityService() {
         override fun run() {
             try {
                 val locked = isKeyguardLocked()
+                if (SystemClock.uptimeMillis() < trustedUnlockUntil && locked) {
+                    handler.postDelayed(this, CONFIRM_POLL_MS)
+                    return
+                }
                 if (lastLocked != locked) {
                     val took = SystemClock.uptimeMillis() - signalBurstStart
                     confirmUntil = 0L
@@ -177,6 +309,8 @@ class NowBarA11yService : AccessibilityService() {
             lastLocked = isKeyguardLocked()
             if (lastLocked == true) armBurst()
             NowBarBridge.service = this
+            NowBarState.onChange = { applyContent() }
+            handler.post(timerTick)
             updateSurfaces()
             handler.post(keyguardPoll)
             Log.i("accessibility overlay connected (locked=$lastLocked)")
@@ -212,6 +346,8 @@ class NowBarA11yService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
+        NowBarState.onChange = null
+        handler.removeCallbacks(timerTick)
         try {
             prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         } catch (t: Throwable) {
@@ -291,6 +427,24 @@ class NowBarA11yService : AccessibilityService() {
                 Log.i("root keyguard signal: $line")
             }
             lastSignalAt = now
+            // Root hands us SystemUI's own words, which land before the public flag flips. Act on
+            // the unlock line directly instead of waiting for `isKeyguardLocked` to agree.
+            val lower = line.lowercase()
+            when {
+                UNLOCK_WORDS.any { lower.contains(it) } -> forceUnlock("root line: $line")
+                LOCK_WORDS.any { lower.contains(it) } -> forceLock("root line: $line")
+            }
+            // Root can read SystemUI's own keyguard log, which is printed before any state an
+            // app can query exists. Act on those lines directly instead of waiting to confirm
+            // with a flag that lags behind them.
+            if (looksLikeUnlock(line)) {
+                forceUnlockFromRoot(line)
+                return
+            }
+            if (looksLikeLock(line)) {
+                forceLockFromRoot(line)
+                return
+            }
             confirmUntil = now + CONFIRM_MS
             handler.removeCallbacks(confirmPoll)
             handler.post(confirmPoll)
@@ -309,17 +463,119 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     /** Called by [UserPresentReceiver]: the keyguard just went away, start the handover now. */
-    fun onUserPresent() {
+    /**
+     * Unlock as soon as any trusted source says so - no waiting for `isKeyguardLocked`.
+     * The lock-screen window is torn down immediately rather than animated.
+     */
+    private fun forceUnlock(source: String) {
         try {
-            if (isKeyguardLocked()) {
-                Log.i("USER_PRESENT but keyguard still locked, ignoring")
-                return
-            }
+            val now = SystemClock.uptimeMillis()
             if (lastLocked == false && sbPill != null) return
             lastLocked = false
-            updateSurfaces()
+            trustedUnlockAt = now
+            trustedUnlockUntil = now + TRUST_MS
+            Log.i("instant unlock ($source)")
+            if (!transitioning) {
+                removePopup()
+                slideLockPillOut()
+            }
+        } catch (t: Throwable) {
+            Log.w("forceUnlock failed", t)
+        }
+    }
+
+    private fun forceLock(source: String) {
+        try {
+            if (lastLocked == true && lockPill != null) return
+            Log.i("instant lock ($source)")
+            onScreenOff()
+        } catch (t: Throwable) {
+            Log.w("forceLock failed", t)
+        }
+    }
+
+    /** Logs when the change actually reaches the display, not just when the call returned. */
+    private fun logFirstFrame(label: String, since: Long) {
+        try {
+            Choreographer.getInstance().postFrameCallback {
+                Log.i("$label: first frame ${SystemClock.uptimeMillis() - since}ms after the change")
+            }
+        } catch (t: Throwable) {
+            Log.w("logFirstFrame failed", t)
+        }
+    }
+
+    fun onUserPresent() {
+        try {
+            // Trust the broadcast itself. It is only sent once the keyguard has actually gone,
+            // while `isKeyguardLocked` keeps reporting "locked" for a few hundred ms afterwards -
+            // that lag is exactly what the pill and the debug dot used to sit behind.
+            if (lastLocked == false && sbPill != null) return
+            val now = SystemClock.uptimeMillis()
+            lastLocked = false
+            trustedUnlockAt = now
+            trustedUnlockUntil = now + TRUST_MS
+            Log.i("USER_PRESENT -> unlocked immediately (flag ignored for ${TRUST_MS}ms)")
+            if (!transitioning) {
+                removePopup()
+                transitionToUnlocked()
+            }
         } catch (t: Throwable) {
             Log.w("onUserPresent failed", t)
+        }
+    }
+
+    /**
+     * Lines SystemUI prints on the way out of the keyguard. Deliberately narrow: a wrong match
+     * would move the pill while the phone is locked, so only explicit exit wording counts.
+     */
+    private fun looksLikeUnlock(line: String): Boolean {
+        val l = line.lowercase()
+        return l.contains("goingaway") ||
+            l.contains("keyguard exit") ||
+            l.contains("startkeyguardexitanimation") ||
+            l.contains("keyguardgone") ||
+            l.contains("onunlock") ||
+            l.contains("keyguardoccluded=true")
+    }
+
+    /** Lines SystemUI prints when the keyguard comes back. */
+    private fun looksLikeLock(line: String): Boolean {
+        val l = line.lowercase()
+        return l.contains("onstartedgoingtosleep") ||
+            l.contains("locknow") ||
+            l.contains("keyguardshowing=true") ||
+            l.contains("mkeyguardshowing=true") ||
+            l.contains("keyguardoccluded=false")
+    }
+
+    /** Unlock, forced from the root stream: tear the keyguard window down now, no flag wait. */
+    private fun forceUnlockFromRoot(line: String) {
+        try {
+            if (lastLocked == false) return
+            val now = SystemClock.uptimeMillis()
+            lastLocked = false
+            rootForcedAt = now
+            trustedUnlockAt = now
+            trustedUnlockUntil = now + TRUST_MS
+            Log.i("root unlock: ${line.take(110)} -> handover now, no flag confirmation")
+            if (!transitioning) {
+                removePopup()
+                slideLockPillOut()
+            }
+        } catch (t: Throwable) {
+            Log.w("root unlock handover failed", t)
+        }
+    }
+
+    /** Lock, forced from the root stream: put the keyguard window back now. */
+    private fun forceLockFromRoot(line: String) {
+        try {
+            if (lastLocked == true) return
+            Log.i("root lock: ${line.take(110)} -> handover now, no flag confirmation")
+            onScreenOff()
+        } catch (t: Throwable) {
+            Log.w("root lock handover failed", t)
         }
     }
 
@@ -335,9 +591,17 @@ class NowBarA11yService : AccessibilityService() {
 
     private fun updateSurfaces() {
         try {
+            if (!TuningStore.isOn(this, TuningStore.MASTER)) {
+                Log.i("pill disabled: no surfaces drawn")
+                removeAllSurfaces()
+                return
+            }
             val locked = isKeyguardLocked()
             lastLocked = locked
             Log.i("surfaces: keyguardLocked=$locked")
+            // The dot is deliberately NOT driven from here: this value is a bare flag read, and
+            // the flag lies for a few hundred ms around screen-off. It follows the two trusted
+            // events instead - ACTION_SCREEN_OFF and ACTION_USER_PRESENT.
             if (transitioning) return
             if (locked) {
                 removePopup()
@@ -351,8 +615,14 @@ class NowBarA11yService : AccessibilityService() {
         }
     }
 
+    /**
+     * `isKeyguardLocked` alone is not trustworthy on this build: it reports false mid-transition
+     * (right after screen-off and while dreaming), which is what once turned the debug dot red on
+     * a locked phone. `isDeviceLocked` is credential based and stays true there, so the device
+     * counts as locked if either says so.
+     */
     private fun isKeyguardLocked(): Boolean = try {
-        keyguard.isKeyguardLocked
+        keyguard.isKeyguardLocked || keyguard.isDeviceLocked
     } catch (t: Throwable) {
         Log.w("keyguard state unreadable, assuming locked", t)
         true
@@ -370,6 +640,8 @@ class NowBarA11yService : AccessibilityService() {
                         // a few hundred ms later, by which time the display is already in doze
                         // and nothing we draw is visible.
                         Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                        // Trusted unlock: the broadcast is only sent once the keyguard is gone.
+                        Intent.ACTION_USER_PRESENT -> onUserPresent()
                         else -> {
                             if (action == Intent.ACTION_SCREEN_ON) armBurst()
                             updateSurfaces()
@@ -382,7 +654,15 @@ class NowBarA11yService : AccessibilityService() {
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_SCREEN_OFF)
             }
-            registerReceiver(r, filter, Context.RECEIVER_NOT_EXPORTED)
+            // Protected system broadcasts. Registered plainly (legal for system broadcasts); the
+            // exported variant is only a fallback. RECEIVER_NOT_EXPORTED is what silently
+            // swallowed SCREEN_OFF / USER_PRESENT before - no "state broadcast:" line ever showed.
+            try {
+                registerReceiver(r, filter)
+            } catch (t: Throwable) {
+                Log.w("plain receiver registration failed, retrying exported", t)
+                registerReceiver(r, filter, Context.RECEIVER_EXPORTED)
+            }
             receiver = r
         } catch (t: Throwable) {
             Log.w("keyguard receiver registration failed", t)
@@ -452,77 +732,113 @@ class NowBarA11yService : AccessibilityService() {
      * drawn; when the handover waited for the keyguard it ran in doze, where nothing renders.
      */
     private fun onScreenOff() {
+        lastScreenOffAt = SystemClock.uptimeMillis()
+        // Already locked with nothing to swap: a second trigger must not add a second pill.
+        if (lockPill != null && sbPill == null) return
+        if (!handoverAllowed()) return
+        transitioning = true
+        handler.postDelayed({ transitioning = false }, 250L)
         try {
             removePopup()
             lastLocked = true
-            // The lock pill goes in first, so it is already there while the status pill leaves.
-            if (lockPill == null) addLockPill(slideIn = false)
-            val pill = sbPill
-            val lp = sbParams
-            if (pill == null || lp == null) return
-            transitioning = true
-            animateY(pill, lp, lp.y, -lp.height, SLIDE_MS, PathInterpolator(0.2f, 0f, 0f, 1f)) {
-                removeSbPill()
-                transitioning = false
-                Log.i("screen off: status pill slid away, lock pill already in place")
-            }
-            Log.i("screen off: status pill sliding up (y ${lp.y} -> ${-lp.height})")
+            // Order matters: the status pill leaves at once, the keyguard pill only lands after
+            // the screen-off animation, so the two are never on screen together.
+            removeSbPillNow()
+            handler.removeCallbacks(showLockPillAfterScreenOff)
+            handler.postDelayed(showLockPillAfterScreenOff, SCREEN_OFF_LOCK_DELAY_MS)
+            Log.i("screen off: status pill removed, lock pill in ${SCREEN_OFF_LOCK_DELAY_MS}ms")
         } catch (t: Throwable) {
             Log.w("onScreenOff failed", t)
             transitioning = false
         }
     }
 
-    private fun slideLockPillOut() {
-        val lock = lockPill
-        val lp = lockParams
-        if (lock == null || lp == null) {
-            if (sbPill == null) addSbPill(slideIn = true)
-            return
-        }
+    /**
+     * Zero-delay window removal. `removeView` waits for the next layout pass to hand the surface
+     * back, which is visible as the pill hanging around after the keyguard is gone;
+     * `removeViewImmediate` tears the window down on the spot.
+     */
+    private fun removeImmediate(view: View) {
+        val t0 = SystemClock.uptimeMillis()
         try {
-            transitioning = true
-            // No gravity change here: the window has been TOP gravity since it was added, so the
-            // slide is a pure y animation and nothing relayouts mid-flight.
-            val topY = lp.y
-            animateY(lock, lp, topY, -lp.height, SLIDE_MS, PathInterpolator(0.2f, 0f, 0f, 1f)) {
-                removeLockPill()
-                transitioning = false
-                addSbPill(slideIn = true)
-                Log.i("keyguard pill slid out, status pill sliding in")
+            // Frame-based proof of when the removal is actually on screen, not just requested.
+            try {
+                Choreographer.getInstance().postFrameCallback {
+                    Log.i("handover: window removal drawn ${SystemClock.uptimeMillis() - t0}ms after removeViewImmediate")
+                }
+            } catch (t: Throwable) {
+                Log.w("frame probe failed", t)
             }
-            Log.i("lock pill sliding up (y $topY -> ${-lp.height})")
+            windowManager.removeViewImmediate(view)
+        } catch (t: Throwable) {
+            Log.w("removeViewImmediate failed, falling back to removeView", t)
+            try {
+                windowManager.removeView(view)
+            } catch (ignored: Throwable) {
+                Log.w("removeView also failed", ignored)
+            }
+        }
+    }
+
+    private fun removeSbPillNow() {
+        val view = sbPill ?: return
+        removeImmediate(view)
+        sbPill = null
+        sbParams = null
+    }
+
+    private fun removeLockPillNow() {
+        lockAnimator?.cancel()
+        lockAnimator = null
+        lockExpanded = false
+        val view = lockPill ?: return
+        removeImmediate(view)
+        lockPill = null
+        lockParams = null
+    }
+
+    /**
+     * Unlock handover, with no animation: the keyguard window is torn down immediately and the
+     * status pill is put in its place, so nothing of the lockscreen pill is left on screen after
+     * the keyguard is gone. The 180 ms slide was what made this feel slow.
+     */
+    private fun slideLockPillOut() {
+        // Already handed over: a duplicated trigger must not tear the pill down and put it back.
+        if (lockPill == null && sbPill != null) return
+        if (!handoverAllowed()) return
+        // Unlocked before the deferred keyguard pill landed: do not put it up now.
+        handler.removeCallbacks(showLockPillAfterScreenOff)
+        transitioning = true
+        handler.postDelayed({ transitioning = false }, 200L)
+        try {
+            val t0 = SystemClock.uptimeMillis()
+            removeLockPillNow()
+            if (sbPill == null) addSbPill(fadeIn = true)
+            Log.i("unlock handover: lock window removed in ${SystemClock.uptimeMillis() - t0}ms (removeViewImmediate)")
+            logFirstFrame("unlock handover", t0)
         } catch (t: Throwable) {
             Log.w("transitionToUnlocked failed", t)
             transitioning = false
             removeLockPill()
-            addSbPill(slideIn = true)
+            addSbPill(slideIn = false)
         }
     }
 
-    /** Lock: the status pill slides up off the top, the keyguard pill slides in from the bottom. */
+    /** Lock handover, also with no animation: status pill removed, keyguard pill put in place. */
     private fun transitionToLocked() {
-        val pill = sbPill
-        val lp = sbParams
-        if (pill == null || lp == null) {
-            if (lockPill == null) addLockPill(slideIn = true)
-            return
-        }
+        if (sbPill == null && lockPill != null) return
+        if (!handoverAllowed()) return
+        transitioning = true
+        handler.postDelayed({ transitioning = false }, 200L)
         try {
-            transitioning = true
-            val startY = lp.y
-            animateY(pill, lp, startY, -lp.height, SLIDE_MS, PathInterpolator(0.2f, 0f, 0f, 1f)) {
-                removeSbPill()
-                transitioning = false
-                addLockPill(slideIn = true)
-                Log.i("status pill slid out, keyguard pill sliding in")
-            }
-            Log.i("status pill sliding up (y $startY -> ${-lp.height})")
+            removeSbPillNow()
+            if (lockPill == null) addLockPill(fadeIn = true)
+            Log.i("lock handover: status window removed, keyguard pill in place instantly")
         } catch (t: Throwable) {
             Log.w("transitionToLocked failed", t)
             transitioning = false
             removeSbPill()
-            addLockPill(slideIn = true)
+            addLockPill(slideIn = false)
         }
     }
 
@@ -535,7 +851,15 @@ class NowBarA11yService : AccessibilityService() {
         interpolator: TimeInterpolator,
         onEnd: (() -> Unit)?
     ) {
-        lockAnimator?.cancel()
+        // Each surface owns its animator. Before this, every slide cancelled `lockAnimator`, so a
+        // status bar slide that happened to be running was killed mid-flight - that is what made
+        // the handover look like a jump instead of motion.
+        val slot = when {
+            view === lockPill -> 0
+            view === sbPill -> 1
+            else -> 2
+        }
+        cancelAnimator(slot)
         val anim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = durationMs
             this.interpolator = interpolator
@@ -549,39 +873,87 @@ class NowBarA11yService : AccessibilityService() {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    // Land exactly on the target: int rounding left the pill a pixel short, which
+                    // read as a twitch at the end of the slide.
+                    lp.y = toY
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t: Throwable) {
+                    }
                     onEnd?.invoke()
                 }
             })
         }
-        lockAnimator = anim
+        setAnimator(slot, anim)
         anim.start()
+    }
+
+    /**
+     * One handover at a time, minimum 400 ms apart. The keyguard flag, the broadcasts and the
+     * root log all report the same change within a few hundred ms of each other; acting on every
+     * one of them is what made the pill vanish, come back, then vanish again.
+     */
+    private fun handoverAllowed(): Boolean {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHandoverAt < 400L) {
+            Log.i("handover suppressed: ${now - lastHandoverAt}ms since the last one")
+            return false
+        }
+        lastHandoverAt = now
+        return true
+    }
+
+    private fun cancelAnimator(slot: Int) {
+        val animator = when (slot) {
+            0 -> lockAnimator
+            1 -> sbAnimator
+            else -> popupAnimator
+        }
+        animator?.cancel()
+        setAnimator(slot, null)
+    }
+
+    private fun setAnimator(slot: Int, animator: ValueAnimator?) {
+        when (slot) {
+            0 -> lockAnimator = animator
+            1 -> sbAnimator = animator
+            else -> popupAnimator = animator
+        }
     }
 
     // ----------------------------------------------------------- lock screen
 
-    private fun addLockPill(slideIn: Boolean = false) {
+    private fun addLockPill(slideIn: Boolean = false, fadeIn: Boolean = false) {
         try {
             if (lockPill != null) return
+            if (!enabled(TuningStore.SURFACE_LOCK)) return
+            if (emptyForLock()) return
             val tuning = Tuning.current(this)
             val view = PillView(this).apply {
-                // Collapsed: a tap opens the expansion. Expanded: taps belong to the controls.
-                setOnClickListener { if (!lockExpanded) toggleLockExpand() }
+                // Collapsed: a tap opens the expansion. Expanded: a tap opens the source app.
+                onTap = { if (lockExpanded) openCurrentApp(true) else toggleLockExpand() }
+                onSwipe = { dx, dy -> handleSwipe(true, dx, dy) }
+                onControl = { action -> handleControl(true, action) }
             }
             val w = dp(tuning.widthDp)
             val h = dp(tuning.heightDp)
             val targetY = lockTopY(tuning.bottomDp, h)
+            // The front card keeps the tuned position; the stack grows downwards from it, so the
+            // window gets taller without the card moving.
+            val windowH = h + peekExtra()
             // TOP gravity from the very first frame. Flipping gravity mid-animation makes
             // WindowManager recompute the window frame, which is what tore the pill in half
             // when unlocking out of the AOD.
             val lp = WindowManager.LayoutParams(
                 w,
-                h,
+                windowH,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 overlayFlags(),
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 y = if (slideIn) screenHeightPx() else targetY
+                if (fadeIn) alpha = 0f
             }
             windowManager.addView(view, lp)
             lockPill = view
@@ -594,7 +966,9 @@ class NowBarA11yService : AccessibilityService() {
             } else {
                 lp.y = targetY
                 windowManager.updateViewLayout(view, lp)
+                if (fadeIn) animateAlphaIn(view, lp)
             }
+            applyContent()
             Log.i("lock pill added: ${w}x${h}px at y=$targetY (top gravity)")
         } catch (t: Throwable) {
             Log.e("a11y addLockPill failed", t)
@@ -624,7 +998,7 @@ class NowBarA11yService : AccessibilityService() {
             val target = lockTargetSize(t, lockExpanded)
             lp.width = target.w
             lp.height = target.h
-            lp.y = lockTopY(t.bottomDp, target.h)
+            lp.y = lockTopY(t.bottomDp, lockCardHeight(t, lockExpanded))
             view.setStyle(t)
             windowManager.updateViewLayout(view, lp)
             Log.i("lock pill updated: ${lp.width}x${lp.height}px expanded=$lockExpanded y=${lp.y}px")
@@ -637,12 +1011,29 @@ class NowBarA11yService : AccessibilityService() {
      * 2.5x while expanded, with the width clamped to the screen: 340 dp x 2.5 would be 850 dp
      * on a 411 dp display, so the height scales fully and the width stops at the screen edge.
      */
+    /** Whole window: the front card plus the room the peeking cards behind it need. */
     private fun lockTargetSize(t: Tuning.Values, expanded: Boolean): Size {
+        val card = lockCardSize(t, expanded)
+        return Size(card.w, card.h + peekExtra())
+    }
+
+    /** The front card on its own, which is what the tuned geometry describes. */
+    private fun lockCardSize(t: Tuning.Values, expanded: Boolean): Size {
         val w = dp(t.widthDp)
         val h = dp(t.heightDp)
         if (!expanded) return Size(w, h)
         val maxW = (screenWidthPx() - dp(16)).coerceAtLeast(w)
         return Size(minOf((w * SCALE).toInt(), maxW), (h * SCALE).toInt())
+    }
+
+    private fun lockCardHeight(t: Tuning.Values, expanded: Boolean): Int =
+        lockCardSize(t, expanded).h
+
+    /** Extra window height for the cards peeking below the front one. */
+    private fun peekExtra(): Int {
+        val count = NowBarState.stackSize(this)
+        if (count <= 1) return 0
+        return dp(TuningStore.stackPeekDp(this)) * (count - 1)
     }
 
     /** Tap: grow to 2.5x, tap again (or tap anywhere else) to settle back. */
@@ -653,31 +1044,60 @@ class NowBarA11yService : AccessibilityService() {
             val t = Tuning.current(this)
             val expanding = !lockExpanded
             lockExpanded = expanding
+            // Update the card's content without touching its size: applyContent() would resize the
+            // window to the expanded target immediately and there would be nothing left to animate.
+            view.setItems(
+                ordered(),
+                expanding,
+                dp(TuningStore.stackPeekDp(this))
+            )
             val target = lockTargetSize(t, expanding)
             lockAnimator?.cancel()
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
                 val fromW = lp.width
                 val fromH = lp.height
                 duration = EXPAND_MS
+                // No overshoot: the bounce at the end read as a stutter, and a plain ease-out
+                // lands on the final size without the last-frame jolt.
                 interpolator = if (expanding) {
-                    OvershootInterpolator(1.2f)
+                    PathInterpolator(0.2f, 0f, 0f, 1f)
                 } else {
                     AccelerateDecelerateInterpolator()
                 }
+                var lastW = -1
+                var lastH = -1
                 addUpdateListener {
                     val f = it.animatedValue as Float
-                    val w = (fromW + (target.w - fromW) * f).toInt()
-                    val h = (fromH + (target.h - fromH) * f).toInt()
+                    val w = Math.round(fromW + (target.w - fromW) * f)
+                    val h = Math.round(fromH + (target.h - fromH) * f)
+                    // One relayout per changed size. Pushing a frame when the rounded size had not
+                    // moved was most of the visible jitter.
+                    if (w == lastW && h == lastH) return@addUpdateListener
+                    lastW = w
+                    lastH = h
                     lp.width = w
                     lp.height = h
                     // With TOP gravity the bottom edge has to be held manually while it grows.
-                    lp.y = lockTopY(t.bottomDp, h)
+                    // The stack's extra height sits below the card, so it is subtracted here.
+                    lp.y = lockTopY(t.bottomDp, (h - peekExtra()).coerceAtLeast(1))
                     try {
                         windowManager.updateViewLayout(view, lp)
                     } catch (t2: Throwable) {
                     }
                 }
             }
+            anim.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    // Finish exactly on the target, so a second tap never grows from a half size.
+                    lp.width = target.w
+                    lp.height = target.h
+                    lp.y = lockTopY(t.bottomDp, lockCardHeight(t, expanding))
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t2: Throwable) {
+                    }
+                }
+            })
             lockAnimator = anim
             anim.start()
             // Only a tap outside the expansion closes it; taps inside belong to the controls.
@@ -695,12 +1115,17 @@ class NowBarA11yService : AccessibilityService() {
 
     // ------------------------------------------------------------ status bar
 
-    private fun addSbPill(slideIn: Boolean = false) {
+    private fun addSbPill(slideIn: Boolean = false, fadeIn: Boolean = false) {
         try {
             if (sbPill != null) return
+            if (!enabled(TuningStore.SURFACE_STATUS)) return
+            if (emptyForStatus()) return
             val t = Tuning.sb(this)
             val view = PillView(this).apply {
-                setOnClickListener { expandFromSbPill() }
+                // The mini pill has no controls of its own: a tap is what opens the expansion.
+                onTap = { expandFromSbPill() }
+                onSwipe = { _, _ -> }
+                onControl = { }
             }
             val lp = WindowManager.LayoutParams(
                 dp(t.widthDp),
@@ -714,12 +1139,21 @@ class NowBarA11yService : AccessibilityService() {
             placeSb(lp, t)
             val targetY = lp.y
             if (slideIn) lp.y = -lp.height
+            // Alpha 0 goes into the LayoutParams *before* addView. Setting it afterwards makes the
+            // window draw once at full alpha, disappear, then fade back in - the flicker.
+            if (fadeIn) lp.alpha = 0f
             view.setStyle(t.label, t.textDp, t.radiusDp)
+            // Content before the add, so the first frame is already the real item.
+            view.setItems(NowBarState.items(this).take(1), false, 0)
+            // A short line gets a short pill: the tuned width is the maximum, not a fixed size.
+            lp.width = view.preferredWidth(dp(t.widthDp), lp.height)
             windowManager.addView(view, lp)
             sbPill = view
             sbParams = lp
             if (slideIn) {
                 animateY(view, lp, -lp.height, targetY, SLIDE_MS, DecelerateInterpolator(1.6f), null)
+            } else if (fadeIn) {
+                animateAlphaIn(view, lp)
             }
             Log.i(
                 "sb pill added: ${t.widthDp}x${t.heightDp}dp at x=${lp.x} y=$targetY " +
@@ -730,7 +1164,22 @@ class NowBarA11yService : AccessibilityService() {
         }
     }
 
+    /** Width of the status bar window follows its line: the tuned width is a maximum. */
+    private fun fitSbWidth(view: PillView) {
+        try {
+            val lp = sbParams ?: return
+            val wanted = view.preferredWidth(dp(Tuning.sb(this).widthDp), lp.height)
+            if (lp.width == wanted) return
+            lp.width = wanted
+            windowManager.updateViewLayout(view, lp)
+        } catch (t: Throwable) {
+            Log.w("sb fit failed", t)
+        }
+    }
+
     private fun removeSbPill() {
+        sbAnimator?.cancel()
+        sbAnimator = null
         val view = sbPill ?: return
         try {
             windowManager.removeView(view)
@@ -747,6 +1196,7 @@ class NowBarA11yService : AccessibilityService() {
         val lp = sbParams ?: return
         try {
             val t = Tuning.sb(this)
+            lp.width = view.preferredWidth(dp(t.widthDp), lp.height)
             placeSb(lp, t)
             view.setStyle(t.label, t.textDp, t.radiusDp)
             windowManager.updateViewLayout(view, lp)
@@ -799,8 +1249,15 @@ class NowBarA11yService : AccessibilityService() {
     private fun popupTargetRect(): Rect4 {
         val p = Tuning.popup(this)
         val w = dp(p.widthDp)
-        val h = dp(p.heightDp)
-        val x = if (p.leftDp >= 0) dp(p.leftDp) else ((screenWidthPx() - w) / 2).coerceAtLeast(0)
+        val h = dp(p.heightDp) + peekExtra()
+        // Portrait centres the popup. Landscape keeps it on the left, where the pill is, so the
+        // expand/collapse animation grows out of the pill instead of flying across the screen.
+        val landscape = screenWidthPx() > screenHeightPx()
+        val x = when {
+            p.leftDp >= 0 -> dp(p.leftDp)
+            landscape -> dp(16)
+            else -> ((screenWidthPx() - w) / 2).coerceAtLeast(0)
+        }
         val y = if (p.topDp >= 0) dp(p.topDp) else statusBarTopPx() + dp(POPUP_GAP_DP)
         return Rect4(x, y, w, h)
     }
@@ -812,12 +1269,22 @@ class NowBarA11yService : AccessibilityService() {
     private fun expandFromSbPill() {
         try {
             if (popupPill != null) return
+            if (!enabled(TuningStore.SURFACE_POPUP)) return
             val pop = Tuning.popup(this)
             val start = pillRect()
             val target = popupTargetRect()
 
             val view = PillView(this).apply {
                 setStyle(pop.label, pop.textDp, pop.radiusDp)
+                // The popup is the expanded status view: it is the only status surface with a control.
+                setItems(
+                    ordered(),
+                    true,
+                    dp(TuningStore.stackPeekDp(this@NowBarA11yService))
+                )
+                onTap = { openCurrentApp(false) }
+                onSwipe = { dx, dy -> handleSwipe(false, dx, dy) }
+                onControl = { action -> handleControl(false, action) }
                 // Taps inside the popup are for its controls; an outside tap closes it.
                 onOutsideTouch = { collapseToSbPill() }
             }
@@ -836,7 +1303,7 @@ class NowBarA11yService : AccessibilityService() {
             windowManager.addView(view, lp)
             popupPill = view
             popupParams = lp
-            animatePopupRect(view, lp, start, target, OvershootInterpolator(1.08f), EXPAND_MS, null)
+            animatePopupRect(view, lp, start, target, OvershootInterpolator(1.08f), EXPAND_MS, onEnd = null)
             Log.i(
                 "popup expanding from pill ${start.w}x${start.h} at ${start.x},${start.y} " +
                     "to ${target.w}x${target.h} at ${target.x},${target.y}"
@@ -852,7 +1319,18 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val start = Rect4(lp.x, lp.y, lp.width, lp.height)
             val pill = pillRect()
-            animatePopupRect(view, lp, start, pill, AccelerateDecelerateInterpolator(), COLLAPSE_MS) {
+            // Freeze the card at its full size and let the shrinking window crop it from the top:
+            // the controls and text slide up behind the pill instead of being squashed into it.
+            view.setContentHeight(lp.height)
+            animatePopupRect(
+                view,
+                lp,
+                start,
+                pill,
+                PathInterpolator(0.3f, 0f, 0.7f, 0.4f),
+                COLLAPSE_MS,
+                fadeTo = 0.1f
+            ) {
                 removePopup()
                 Log.i("popup collapsed back into the status bar pill (pill stayed visible)")
             }
@@ -900,6 +1378,7 @@ class NowBarA11yService : AccessibilityService() {
         to: Rect4,
         interpolator: TimeInterpolator,
         durationMs: Long,
+        fadeTo: Float? = null,
         onEnd: (() -> Unit)?
     ) {
         popupAnimator?.cancel()
@@ -912,6 +1391,9 @@ class NowBarA11yService : AccessibilityService() {
                 lp.y = (from.y + (to.y - from.y) * f).toInt()
                 lp.width = (from.w + (to.w - from.w) * f).toInt()
                 lp.height = (from.h + (to.h - from.h) * f).toInt()
+                // Fading while it falls into the pill hides the last, smallest frames where the
+                // clipped card would still show a sliver of itself.
+                if (fadeTo != null) lp.alpha = 1f - f * (1f - fadeTo)
                 try {
                     windowManager.updateViewLayout(view, lp)
                 } catch (t: Throwable) {
@@ -919,12 +1401,57 @@ class NowBarA11yService : AccessibilityService() {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    // Land exactly on the target rect: the overshoot interpolator plus int
+                    // rounding used to leave the popup a few pixels off its own tuning, which is
+                    // why it never quite matched the numbers.
+                    lp.x = to.x
+                    lp.y = to.y
+                    lp.width = to.w
+                    lp.height = to.h
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t: Throwable) {
+                    }
                     onEnd?.invoke()
                 }
             })
         }
         popupAnimator = anim
         anim.start()
+    }
+
+    /**
+     * Short fade for the pill that takes over during a handover. The outgoing window is still
+     * removed immediately; only the incoming one eases in, so the swap has motion without delay.
+     */
+    private fun animateAlphaIn(view: View, lp: WindowManager.LayoutParams, durationMs: Long = 120L) {
+        try {
+            val slot = if (view === lockPill) 0 else 1
+            cancelAnimator(slot)
+            val anim = ValueAnimator.ofFloat(lp.alpha.coerceAtLeast(0f), 1f).apply {
+                duration = durationMs
+                addUpdateListener {
+                    lp.alpha = it.animatedValue as Float
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t: Throwable) {
+                    }
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        lp.alpha = 1f
+                        try {
+                            windowManager.updateViewLayout(view, lp)
+                        } catch (t: Throwable) {
+                        }
+                    }
+                })
+            }
+            setAnimator(slot, anim)
+            anim.start()
+        } catch (t: Throwable) {
+            Log.w("fadeIn failed", t)
+        }
     }
 
     // ----------------------------------------------------------------- misc
@@ -974,9 +1501,258 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     private fun applyAll() {
+        if (!TuningStore.isOn(this, TuningStore.MASTER)) {
+            removeAllSurfaces()
+            return
+        }
+        // A surface switched off while it was on screen has to leave now, and one switched back
+        // on has to appear without waiting for the next lock/unlock cycle. When the state already
+        // matches, both branches are no-ops, so dragging a slider costs nothing.
+        if (!enabled(TuningStore.SURFACE_LOCK)) {
+            removeLockPill()
+        } else if (lockPill == null && lastLocked == true) {
+            addLockPill(fadeIn = true)
+        }
+        if (!enabled(TuningStore.SURFACE_STATUS)) {
+            removeSbPill()
+        } else if (sbPill == null && lastLocked == false) {
+            addSbPill(fadeIn = true)
+        }
+        if (!enabled(TuningStore.SURFACE_POPUP)) removePopup()
         applyLockTuning()
         applySbTuning()
         applyPopupTuning()
+        applyContent()
+    }
+
+    /** Master switch and per-surface switch, read fresh every time a window is about to appear. */
+    private fun enabled(surface: String): Boolean =
+        TuningStore.isOn(this, TuningStore.MASTER) && TuningStore.isOn(this, surface)
+
+    /** The lock screen and the popup only exist while something is active. */
+    private fun emptyForLock(): Boolean = NowBarState.items(this).isEmpty()
+
+    /**
+     * Only the status bar pill can be configured for the idle case: it may show the placeholder,
+     * the logo, or nothing at all. The other surfaces are never placeholder surfaces.
+     */
+    private fun emptyForStatus(): Boolean =
+        NowBarState.items(this).isEmpty() && TuningStore.emptyMode(this) == "hidden"
+
+    /** Pushes the current item into whichever pills exist; each surface decides what it shows. */
+    private fun applyContent() {
+        // addLockPill/addSbPill call back into here once the window exists, so the outer call has
+        // to be the one that keeps going.
+        if (applyingContent) return
+        applyingContent = true
+        try {
+            val items = NowBarState.items(this)
+            if (items.isEmpty()) {
+                // Nothing active: the lock pill and the popup have nothing to draw and go away.
+                // The status bar pill alone can keep its configured idle look (text, logo) or be
+                // removed when the owner chose "hide".
+                removeLockPill()
+                removePopup()
+                if (TuningStore.emptyMode(this) == "hidden") removeSbPill() else sbPill?.let { view ->
+                    view.setItems(emptyList(), false, 0)
+                    // Back to the idle line: the pill has to shrink with it, otherwise it keeps
+                    // the width of the card that just went away.
+                    fitSbWidth(view)
+                }
+                return
+            }
+            // An activity can start while a surface is not drawn yet - a timer on an idle status
+            // bar, or after the lock pill was removed for having nothing to show. This is the only
+            // path that runs on every item change, so it has to be able to create the window too,
+            // not just fill one that already exists (that needed "Apply settings" before).
+            ensureSurface()
+            val peek = dp(TuningStore.stackPeekDp(this))
+
+            lockPill?.let { view ->
+                view.setItems(ordered(), lockExpanded, peek)
+                // The item count decides the window height, so grow/shrink it when the stack
+                // changes - but never mid-expansion, where the animator owns the size.
+                val t = Tuning.current(this)
+                val target = lockTargetSize(t, lockExpanded)
+                val lp = lockParams
+                if (lp != null && lockAnimator?.isRunning != true &&
+                    (lp.height != target.h || lp.width != target.w)
+                ) {
+                    lp.width = target.w
+                    lp.height = target.h
+                    lp.y = lockTopY(t.bottomDp, lockCardHeight(t, lockExpanded))
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t2: Throwable) {
+                        Log.w("lock stack resize failed", t2)
+                    }
+                }
+            }
+
+            // The status bar pill is one line, no control, no stack - but it follows the same
+            // selected card, so swiping anywhere on the pill changes what the status bar shows.
+            sbPill?.let { view ->
+                view.setItems(ordered().take(1), false, 0)
+                // Shrink to the line instead of leaving empty card to the right of the text.
+                fitSbWidth(view)
+            }
+
+            popupPill?.let { view ->
+                view.setItems(ordered(), true, peek)
+                val target = popupTargetRect()
+                val lp = popupParams
+                if (lp != null && popupAnimator?.isRunning != true &&
+                    (lp.height != target.h || lp.width != target.w)
+                ) {
+                    lp.width = target.w
+                    lp.height = target.h
+                    lp.y = target.y
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t2: Throwable) {
+                        Log.w("popup stack resize failed", t2)
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("applyContent failed", t)
+        } finally {
+            applyingContent = false
+        }
+    }
+
+    /**
+     * Adds the surface that belongs to the current lock state when it is missing. Keyed off
+     * [lastLocked], which the trusted unlock/lock paths set, so this never fights a handover in
+     * flight (while [transitioning] both surfaces are being moved on purpose).
+     */
+    private fun ensureSurface() {
+        if (transitioning) return
+        when (lastLocked) {
+            true -> if (lockPill == null) addLockPill(fadeIn = true)
+            false -> if (sbPill == null) addSbPill(fadeIn = true)
+            null -> Unit
+        }
+    }
+
+    /** Every item in ranking order, rotated so the swiped-to card leads. */
+    private fun ordered(): List<NowBarItem> {
+        val items = NowBarState.items(this)
+        val key = frontKey ?: return items
+        val i = items.indexOfFirst { it.id == key }
+        if (i <= 0) return items
+        return items.drop(i) + items.take(i)
+    }
+
+    private fun itemsFor(): List<NowBarItem> = ordered()
+
+    /** Runs the slide transition on every surface that is on screen. */
+    private fun animateSwap(dy: Int) {
+        try {
+            lockPill?.animateSwap(dy)
+            popupPill?.animateSwap(dy)
+            sbPill?.animateSwap(dy)
+        } catch (t: Throwable) {
+            Log.w("swap animation failed", t)
+        }
+    }
+
+    /**
+     * Left/right skips in the player, but only when the card in front is the media card.
+     * Up/down moves to the next or previous card and makes it the front card everywhere,
+     * including the status bar pill.
+     */
+    private fun handleSwipe(lockSurface: Boolean, dx: Int, dy: Int) {
+        try {
+            val items = itemsFor()
+            val front = items.firstOrNull() ?: return
+            if (dx != 0) {
+                if (front.kind != ItemKind.MEDIA) return
+                if (dx > 0) MediaActions.next(this, front.token)
+                else MediaActions.previous(this, front.token)
+                return
+            }
+            if (dy == 0 || items.size < 2) return
+            val next = ((items.indexOf(front) + dy) % items.size + items.size) % items.size
+            frontKey = items[next].id
+            applyContent()
+            animateSwap(dy)
+            Log.i(
+                "swipe on ${if (lockSurface) "lock" else "popup"}: front card is now " +
+                    "'${items[next].title}'"
+            )
+        } catch (t: Throwable) {
+            Log.w("handleSwipe failed", t)
+        }
+    }
+
+    private fun handleControl(lockSurface: Boolean, action: String) {
+        try {
+            val item = itemsFor().firstOrNull() ?: return
+            // "action:n" is one of the source notification's own buttons: sending its
+            // PendingIntent makes the app do the work, so the pill needs no permission.
+            if (action.startsWith("action:")) {
+                val index = action.removePrefix("action:").toIntOrNull() ?: return
+                val pending = item.actions.getOrNull(index)?.pendingIntent
+                if (pending == null) {
+                    Log.w("control $action has no action on '${item.title}'")
+                    return
+                }
+                pending.send()
+                Log.i("sent '${item.actions[index].label}' for '${item.title}'")
+                return
+            }
+            when (action) {
+                "prev" -> MediaActions.previous(this, item.token)
+                "next" -> MediaActions.next(this, item.token)
+                else -> MediaActions.playPause(this, item.token)
+            }
+        } catch (t: Throwable) {
+            Log.w("handleControl failed", t)
+        }
+    }
+
+    /** Tapping an expanded card opens the app the item came from. */
+    private fun openCurrentApp(lockSurface: Boolean) {
+        try {
+            val item = itemsFor().firstOrNull() ?: return
+            val pkg = item.packageName ?: return
+            val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+            startActivity(intent)
+            Log.i("opened $pkg from the pill")
+        } catch (t: Throwable) {
+            Log.w("open app failed", t)
+        }
+    }
+
+    private fun removeAllSurfaces() {
+        try {
+            removePopup()
+            removeLockPill()
+            removeSbPill()
+        } catch (t: Throwable) {
+            Log.w("removeAllSurfaces failed", t)
+        }
+    }
+
+    /**
+     * The settings screen's "Apply settings" button: re-read every preference and re-apply it
+     * immediately, without waiting for a card, a lock cycle or a service restart.
+     */
+    fun reloadNow() {
+        try {
+            handler.post {
+                try {
+                    applyAll()
+                    Log.i("settings applied on request")
+                } catch (t: Throwable) {
+                    Log.w("reload failed", t)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("reloadNow failed", t)
+        }
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()

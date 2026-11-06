@@ -1,5 +1,7 @@
 package dev.brl.nowbar.module
 
+import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -12,6 +14,8 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.text.TextPaint
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -19,12 +23,14 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.NestedScrollView
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.slider.Slider
@@ -32,11 +38,12 @@ import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 
 /**
- * The settings screen: Material 3, wallpaper-derived colours (Material You), one card per surface.
+ * The settings screen: Material 3, wallpaper-derived colours (Material You), grouped into
+ * sections with one card per surface.
  *
- * Every control writes straight into the shared preferences that the overlay service watches, so
- * edits land on the pill live. The slider ranges stay at 0..1000 dp so nothing is capped while the
- * layout is still being dialled in.
+ * Every control writes straight into the shared preferences the overlay service watches, so
+ * edits land on the pill live. The slider ranges stay at 0..1000 dp so nothing is capped while
+ * the layout is still being dialled in.
  */
 class SettingsActivity : AppCompatActivity() {
 
@@ -51,11 +58,25 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var toolbar: MaterialToolbar
     private lateinit var column: LinearLayout
-    private lateinit var preview: PillPreview
+    private lateinit var applyBar: LinearLayout
+
+    private lateinit var heroDot: View
+    private lateinit var heroTitle: TextView
+    private lateinit var heroSubtitle: TextView
     private lateinit var overlaySwitch: MaterialSwitch
-    private lateinit var lockPillStatus: StatusRow
-    private lateinit var sbPillStatus: StatusRow
+    private lateinit var masterSwitch: MaterialSwitch
+    private lateinit var listenerStatus: StatusRow
+    private lateinit var a11yStatus: StatusRow
     private lateinit var watcherStatus: StatusRow
+    private lateinit var overlayStatus: StatusRow
+    private lateinit var hookStatus: StatusRow
+
+    private lateinit var lockPreview: SurfacePreview
+    private lateinit var sbPreview: SurfacePreview
+    private lateinit var popupPreview: SurfacePreview
+    private lateinit var lockCaption: TextView
+    private lateinit var sbCaption: TextView
+    private lateinit var popupCaption: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +94,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun buildScaffold(): View {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.setBackgroundColor(themeColor(com.google.android.material.R.attr.colorSurface))
 
         toolbar = MaterialToolbar(this).apply {
             title = getString(R.string.app_name)
@@ -88,40 +110,80 @@ class SettingsActivity : AppCompatActivity() {
         scroll.addView(column, android.widget.FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         root.addView(scroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
+        // Always-visible action bar for Apply: the button in the scrolling hero card was easy to
+        // miss, and a settings screen needs an obvious way to push the whole config at once.
+        applyBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        applyBar.addView(
+            MaterialButton(this).apply {
+                text = "Apply settings"
+                setOnClickListener { applySettings() }
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        )
+        root.addView(applyBar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
         // Edge-to-edge: keep the toolbar below the status bar and above the gesture bar.
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
             toolbar.setPadding(0, bars.top, 0, 0)
-            column.setPadding(dp(16), dp(4), dp(16), dp(48) + bars.bottom)
+            column.setPadding(dp(16), dp(4), dp(16), dp(24))
+            applyBar.setPadding(dp(16), dp(8), dp(16), dp(8) + bars.bottom)
             insets
         }
         return root
     }
 
     private fun buildContent() {
-        statusCard()
-        previewCard()
-        lockPillCard()
+        heroCard()
+        sectionHeader("Surfaces")
+        lockCard()
         statusBarCard()
+        androidBarCard()
         popupCard()
+        sectionHeader("Look")
+        lookCard()
+        textCard()
+        sectionHeader("Content")
+        itemsCard()
+        rankCard()
         labelCard()
-        advancedCard()
+        sectionHeader("Simulate")
+        simulateCard()
+        sectionHeader("Maintenance")
+        toolingCard()
     }
 
-    // ------------------------------------------------------------------ cards
+    // ---------------------------------------------------------------- layout
+
+    private fun sectionHeader(text: String) {
+        column.addView(
+            TextView(this).apply {
+                this.text = text.uppercase()
+                textSize = 12f
+                letterSpacing = 0.1f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(themeColor(androidx.appcompat.R.attr.colorPrimary))
+                setPadding(dp(8), dp(20), dp(8), dp(8))
+            }
+        )
+    }
 
     /** Material card with a heading; returns the container to put rows into. */
     private fun card(title: String, subtitle: String? = null): LinearLayout {
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(14))
+            setPadding(dp(20), dp(18), dp(20), dp(16))
         }
         content.addView(
             TextView(this).apply {
                 text = title
                 textSize = 17f
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
                 setTypeface(typeface, Typeface.BOLD)
             }
         )
@@ -130,14 +192,17 @@ class SettingsActivity : AppCompatActivity() {
                 TextView(this).apply {
                     text = subtitle
                     textSize = 13f
-                    alpha = 0.7f
+                    setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
                     setPadding(0, dp(4), 0, 0)
                 }
             )
         }
         val card = MaterialCardView(this).apply {
-            radius = dp(24).toFloat()
-            cardElevation = dp(1).toFloat()
+            radius = dp(26).toFloat()
+            cardElevation = 0f
+            strokeWidth = dp(1)
+            strokeColor = themeColor(com.google.android.material.R.attr.colorOutline)
+            setCardBackgroundColor(themeColor(com.google.android.material.R.attr.colorSurfaceVariant))
         }
         card.addView(content, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         column.addView(
@@ -147,82 +212,408 @@ class SettingsActivity : AppCompatActivity() {
         return content
     }
 
-    private fun statusCard() {
+    // ------------------------------------------------------------------ cards
+
+    private fun heroCard() {
         val body = card("Status", "What is drawing the pill right now")
 
-        lockPillStatus = StatusRow(this)
-        lockPillStatus.title = "Lockscreen pill"
-        body.addView(lockPillStatus, rowParams())
+        val hero = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(14), 0, dp(6))
+        }
+        heroDot = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(OFF)
+            }
+        }
+        hero.addView(heroDot, LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(12) })
+        val heroTexts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        heroTitle = TextView(this).apply {
+            textSize = 16f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
+        }
+        heroSubtitle = TextView(this).apply {
+            textSize = 12f
+            setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+        }
+        heroTexts.addView(heroTitle)
+        heroTexts.addView(heroSubtitle)
+        hero.addView(heroTexts, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        body.addView(hero, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        sbPillStatus = StatusRow(this)
-        sbPillStatus.title = "Status bar pill"
-        body.addView(sbPillStatus, rowParams())
+        masterSwitch = switchRow(
+            body,
+            "Pill enabled",
+            "Master switch for every surface",
+            TuningStore.isOn(this, TuningStore.MASTER)
+        ) { on -> prefs.edit().putBoolean(TuningStore.MASTER, on).apply() }
 
-        watcherStatus = StatusRow(this)
-        watcherStatus.title = "Root unlock watcher"
+        a11yStatus = StatusRow(this).apply { title = "Accessibility overlay" }
+        body.addView(a11yStatus, rowParams())
+
+        watcherStatus = StatusRow(this).apply { title = "Root unlock watcher" }
         body.addView(watcherStatus, rowParams())
+
+        overlayStatus = StatusRow(this).apply { title = "Draw over apps" }
+        body.addView(overlayStatus, rowParams())
 
         overlaySwitch = switchRow(
             body,
-            "Draw over apps (overlay)",
-            "Needed only if the accessibility service is off",
+            "Fallback overlay",
+            "Only needed if the accessibility service is off",
             OverlayService.running
         ) { checked -> setOverlay(checked) }
 
-        button(body, "Open accessibility settings") {
-            try {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            } catch (t: Throwable) {
-                Log.w("accessibility settings intent failed", t)
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        actions.addView(
+            outlinedButton("Accessibility settings") {
+                try {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                } catch (t: Throwable) {
+                    Log.w("accessibility settings intent failed", t)
+                }
             }
+        )
+        body.addView(actions, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+    }
+
+    /** Tells the running service to re-read every preference. */
+    private fun applySettings() {
+        try {
+            sendBroadcast(
+                Intent(this, TuningReceiver::class.java).setAction(TuningReceiver.ACTION_RELOAD)
+            )
+            Toast.makeText(this, "Settings applied", Toast.LENGTH_SHORT).show()
+            Log.i("settings apply requested")
+        } catch (t: Throwable) {
+            Log.w("apply settings failed", t)
         }
     }
 
-    private fun previewCard() {
-        val body = card("Preview", "Scaled to fit; the pill on screen uses the real size")
-        preview = PillPreview(this)
-        preview.setColors(
-            themeColor(com.google.android.material.R.attr.colorSurfaceVariant),
-            themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant)
-        )
-        body.addView(
-            preview,
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) }
-        )
-        refreshPreview()
-    }
-
-    private fun lockPillCard() {
-        val body = card("Lockscreen pill", "Bottom centre, above the fingerprint circle")
-        sliderRow(body, "Width", "widthDp", TuningStore.DEFAULT_WIDTH_DP, { refreshPreview() })
-        sliderRow(body, "Height", "heightDp", TuningStore.DEFAULT_HEIGHT_DP, { refreshPreview() })
-        sliderRow(body, "Text size", "textDp", TuningStore.DEFAULT_TEXT_DP, { refreshPreview() })
-        sliderRow(body, "Corner radius (0 = pill)", "radiusDp", TuningStore.DEFAULT_RADIUS_DP, { refreshPreview() })
+    private fun lockCard() {
+        val body = card("Lockscreen pill", "Bottom centre, clear of the fingerprint circle")
+        surfaceSwitch(body, "Show on the lock screen", TuningStore.SURFACE_LOCK)
+        lockPreview = preview(body)
+        lockCaption = caption(body)
+        sliderRow(body, "Width", "widthDp", TuningStore.DEFAULT_WIDTH_DP) { refreshPreviews() }
+        sliderRow(body, "Height", "heightDp", TuningStore.DEFAULT_HEIGHT_DP) { refreshPreviews() }
+        sliderRow(body, "Text size", "textDp", TuningStore.DEFAULT_TEXT_DP) { refreshPreviews() }
+        sliderRow(body, "Corner radius (0 = pill)", "radiusDp", TuningStore.DEFAULT_RADIUS_DP) {
+            refreshPreviews()
+        }
         sliderRow(body, "Height above bottom edge", "bottomDp", TuningStore.DEFAULT_BOTTOM_DP, null)
     }
 
     private fun statusBarCard() {
         val body = card("Status bar pill", "Sits over the notification icons while unlocked")
-        sliderRow(body, "Width", "sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP, { refreshPreview() })
-        sliderRow(body, "Height", "sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP, { refreshPreview() })
+        surfaceSwitch(body, "Show in the status bar", TuningStore.SURFACE_STATUS)
+        sbPreview = preview(body)
+        sbCaption = caption(body)
+        sliderRow(body, "Width", "sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP) { refreshPreviews() }
+        sliderRow(body, "Height", "sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP) { refreshPreviews() }
         sliderRow(body, "Text size", "sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP, null)
         sliderRow(body, "Corner radius (0 = pill)", "sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP, null)
-        sliderRow(body, "Left edge", "sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP, null)
-        sliderRow(body, "Top edge (0 = centred)", "sbTopDp", TuningStore.DEFAULT_SB_TOP_DP, null)
+        sliderRow(body, "Left edge (-1 = auto)", "sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP, null)
+        sliderRow(body, "Top edge (-1 = centred)", "sbTopDp", TuningStore.DEFAULT_SB_TOP_DP, null)
+    }
+
+    /**
+     * The two things Android draws in the strip bbbar's pill uses. Both need the Xposed side, so
+     * the switches write Settings.Global through root, which SystemUI can read from inside.
+     */
+    private fun androidBarCard() {
+        val body = card("Android status bar", "What Android draws where the pill sits")
+        hookStatus = StatusRow(this).apply { title = "Xposed hook" }
+        body.addView(hookStatus, rowParams())
+        globalSwitch(
+            body,
+            "Hide notification icons",
+            "The app icons Android puts next to the clock",
+            NowBarHook.KEY_HIDE_ICONS
+        )
+        globalSwitch(
+            body,
+            "Hide Android live updates",
+            "The system's own Live Update chips (bbbar's cards stay)",
+            NowBarHook.KEY_HIDE_CHIPS
+        )
+        captionView(
+            body,
+            "Needs the bbbar Xposed module enabled for com.android.systemui, and one SystemUI " +
+                "restart after installing. SystemUI can be restarted from Test tooling below."
+        )
+    }
+
+    /** A switch backed by Settings.Global: root writes it, the SystemUI hook reads it. */
+    private fun globalSwitch(
+        parent: LinearLayout,
+        title: String,
+        subtitle: String,
+        key: String
+    ) {
+        switchRow(parent, title, subtitle, globalFlag(key)) { on ->
+            Thread {
+                val value = if (on) 1 else 0
+                RootShell.run("settings put global $key $value")
+                runOnUiThread { Log.i("$key = $value") }
+            }.start()
+        }
+    }
+
+    private fun globalFlag(key: String): Boolean {
+        return try {
+            Settings.Global.getInt(contentResolver, key, 0) == 1
+        } catch (t: Throwable) {
+            // Reading arbitrary global keys is not always allowed; root can always tell us.
+            RootShell.globalInt("settings get global $key") == 1
+        }
+    }
+
+    /** Small grey note inside a card. */
+    private fun captionView(parent: LinearLayout, text: String) {
+        parent.addView(
+            TextView(this).apply {
+                this.text = text
+                textSize = 12f
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+                setPadding(0, dp(10), 0, 0)
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        )
     }
 
     private fun popupCard() {
         val body = card("Expanded popup", "Grows out of the status bar pill on tap")
+        surfaceSwitch(body, "Show the expanded pop-up", TuningStore.SURFACE_POPUP)
+        popupPreview = preview(body)
+        popupCaption = caption(body)
         sliderRow(body, "Width", "popupWidthDp", TuningStore.DEFAULT_POPUP_WIDTH_DP, null)
         sliderRow(body, "Height", "popupHeightDp", TuningStore.DEFAULT_POPUP_HEIGHT_DP, null)
-        sliderRow(body, "Text size", "popupTextDp", TuningStore.DEFAULT_POPUP_TEXT_DP, null)
+        sliderRow(body, "Text size", "popupTextDp", TuningStore.DEFAULT_POPUP_TEXT_DP) {
+            refreshPreviews()
+        }
         sliderRow(body, "Corner radius (0 = pill)", "popupRadiusDp", TuningStore.DEFAULT_POPUP_RADIUS_DP, null)
-        sliderRow(body, "Left edge", "popupLeftDp", TuningStore.DEFAULT_POPUP_LEFT_DP, null)
-        sliderRow(body, "Top edge", "popupTopDp", TuningStore.DEFAULT_POPUP_TOP_DP, null)
+        sliderRow(body, "Left edge (-1 = centred)", "popupLeftDp", TuningStore.DEFAULT_POPUP_LEFT_DP, null)
+        sliderRow(body, "Top edge (-1 = below status bar)", "popupTopDp", TuningStore.DEFAULT_POPUP_TOP_DP, null)
     }
 
+    private fun itemsCard() {
+        val body = card("Items", "What the pill is allowed to show")
+        featureSwitch(body, "Media", "Album art, title and play/pause", TuningStore.FEATURE_MEDIA)
+        featureSwitch(body, "Timers and stopwatch", "Countdown from the clock app", TuningStore.FEATURE_TIMERS)
+        featureSwitch(body, "Next alarm", "Minutes until your next alarm", TuningStore.FEATURE_ALARM)
+        featureSwitch(body, "Live updates", "Any app's progress notification", TuningStore.FEATURE_LIVE)
+        // Lock screen and popup simply disappear when idle; only the status bar pill has a look
+        // for that case.
+        choiceRow(
+            body,
+            "Status bar when nothing is showing",
+            TuningStore.EMPTY_MODE,
+            TuningStore.emptyMode(this),
+            listOf("placeholder" to "Text", "logo" to "Logo", "hidden" to "Hide")
+        )
+
+        listenerStatus = StatusRow(this).apply { title = "Notification access" }
+        body.addView(listenerStatus, rowParams())
+
+        button(body, "Notification access settings") {
+            try {
+                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            } catch (t: Throwable) {
+                Log.w("notification listener settings intent failed", t)
+            }
+        }
+    }
+
+    private fun featureSwitch(parent: LinearLayout, title: String, subtitle: String, key: String) {
+        switchRow(parent, title, subtitle, TuningStore.isOn(this, key)) { on ->
+            prefs.edit().putBoolean(key, on).apply()
+        }
+    }
+
+    private fun surfaceSwitch(parent: LinearLayout, title: String, key: String) {
+        switchRow(parent, title, null, TuningStore.isOn(this, key)) { on ->
+            prefs.edit().putBoolean(key, on).apply()
+        }
+    }
+
+    private fun lookCard() {
+        val body = card("Media artwork", "The cover becomes the card background")
+        choiceRow(
+            body,
+            "Treatment",
+            TuningStore.ART_MODE,
+            TuningStore.artMode(this),
+            listOf("plain" to "Plain", "tinted" to "Tint", "blurred" to "Blur", "both" to "Both")
+        )
+        switchRow(
+            body,
+            "Tint with the system accent",
+            "Off uses the app's own blue",
+            prefs.getString(TuningStore.ART_TINT, "system") != "custom"
+        ) { on -> prefs.edit().putString(TuningStore.ART_TINT, if (on) "system" else "custom").apply() }
+        sliderRow(
+            body,
+            "Blur strength",
+            TuningStore.BLUR_STRENGTH,
+            3,
+            null
+        )
+        sliderRow(
+            body,
+            "Tint intensity",
+            TuningStore.ART_TINT_STRENGTH,
+            55,
+            null
+        )
+        sliderRow(
+            body,
+            "Stack spacing",
+            TuningStore.STACK_PEEK,
+            TuningStore.DEFAULT_STACK_PEEK_DP,
+            null
+        )
+    }
+
+    private fun textCard() {
+        val body = card("Text", "One line per card, cut off at the edge")
+        switchRow(
+            body,
+            "Scroll long lines",
+            "Holds, slides the hidden part into view, holds again and loops. Off cuts it with \u2026.",
+            TuningStore.scrollText(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.SCROLL_TEXT, on).apply()
+            NowBarBridge.reload()
+        }
+    }
+
+    /** A Material toggle group: one selected option, written straight to prefs. */
+    private fun choiceRow(
+        parent: LinearLayout,
+        title: String,
+        key: String,
+        current: String,
+        options: List<Pair<String, String>>
+    ) {
+        parent.addView(
+            TextView(this).apply {
+                text = title
+                textSize = 15f
+                setPadding(0, dp(16), 0, dp(8))
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
+            },
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        )
+        val group = MaterialButtonToggleGroup(this).apply {
+            isSingleSelection = true
+            isSelectionRequired = true
+        }
+        for ((value, label) in options) {
+            val button = MaterialButton(
+                this,
+                null,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle
+            ).apply {
+                text = label
+                textSize = 12f
+                isCheckable = true
+                tag = value
+                minWidth = 0
+                insetLeft = 0
+                insetRight = 0
+            }
+            group.addView(
+                button,
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            )
+            if (value == current) button.isChecked = true
+        }
+        group.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val button = group.findViewById<MaterialButton>(checkedId) ?: return@addOnButtonCheckedListener
+            prefs.edit().putString(key, button.tag as String).apply()
+        }
+        parent.addView(group, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+    }
+
+    /** Ranking: which item wins when several are active. Top of the list shows first. */
+    private fun rankCard() {
+        val body = card("Ranking", "Top shows first. Switch an item off under Items.")
+        val labels = mapOf(
+            "media" to "Media",
+            "timers" to "Timers and stopwatch",
+            "alarm" to "Next alarm",
+            "live" to "Live updates"
+        )
+        val rows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(rows, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+        val order = TuningStore.rankOrder(this)
+        order.forEachIndexed { index, key ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val featureKey = when (key) {
+                "media" -> TuningStore.FEATURE_MEDIA
+                "timers" -> TuningStore.FEATURE_TIMERS
+                "alarm" -> TuningStore.FEATURE_ALARM
+                else -> TuningStore.FEATURE_LIVE
+            }
+            val on = TuningStore.isOn(this, featureKey)
+            row.addView(
+                TextView(this).apply {
+                    text = "${index + 1}. ${labels[key] ?: key}" + if (on) "" else "  ·  off"
+                    textSize = 15f
+                    alpha = if (on) 1f else 0.5f
+                    setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            )
+            row.addView(
+                smallButton("▲", enabled = index > 0) { moveRank(index, -1) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+            )
+            row.addView(
+                smallButton("▼", enabled = index < order.lastIndex) { moveRank(index, 1) },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { leftMargin = dp(4) }
+            )
+            rows.addView(row, rowParams())
+        }
+    }
+
+    private fun moveRank(index: Int, delta: Int) {
+        val order = TuningStore.rankOrder(this).toMutableList()
+        val to = index + delta
+        if (to !in order.indices) return
+        val moved = order.removeAt(index)
+        order.add(to, moved)
+        prefs.edit().putString(TuningStore.RANK_ORDER, order.joinToString(",")).apply()
+        recreate()
+    }
+
+    private fun smallButton(text: String, enabled: Boolean, onClick: () -> Unit): MaterialButton =
+        MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+            .apply {
+                this.text = text
+                textSize = 13f
+                minWidth = 0
+                minimumWidth = 0
+                insetLeft = 0
+                insetRight = 0
+                isEnabled = enabled
+                setOnClickListener { onClick() }
+            }
+
     private fun labelCard() {
-        val body = card("Label", "Placeholder text until real items arrive")
+        val body = card("Placeholder label", "Temporary text until real items replace it")
         val input = TextInputLayout(this).apply {
             hint = "Text shown in the pill"
             boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
@@ -235,7 +626,7 @@ class SettingsActivity : AppCompatActivity() {
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun afterTextChanged(s: android.text.Editable?) {
                     prefs.edit().putString("label", s?.toString() ?: TuningStore.DEFAULT_LABEL).apply()
-                    refreshPreview()
+                    refreshPreviews()
                 }
 
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -245,11 +636,132 @@ class SettingsActivity : AppCompatActivity() {
         input.addView(edit)
         body.addView(
             input,
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) }
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) }
         )
     }
 
-    private fun advancedCard() {
+    /**
+     * Preview of every item type, drawn by the real [PillView] with sample data, so the look of
+     * each activity can be judged without music playing or a charger plugged in.
+     */
+    private fun simulateCard() {
+        val body = card(
+            "Fake activities",
+            "Switch one on to put it on the real pill; it wins over live content until switched off"
+        )
+        simSwitches.clear()
+        button(body, "Stop all fakes") {
+            NowBarState.clearSimulated()
+            simSwitches.forEach { it.isChecked = false }
+        }
+        val textDp = prefs.getInt("textDp", TuningStore.DEFAULT_TEXT_DP)
+        val radiusDp = prefs.getInt("radiusDp", TuningStore.DEFAULT_RADIUS_DP)
+        val h = prefs.getInt("heightDp", TuningStore.DEFAULT_HEIGHT_DP).coerceIn(40, 120)
+
+        addPreview(body, "Media", h, textDp, radiusDp, NowBarItem(
+            id = "sim|media",
+            kind = ItemKind.MEDIA,
+            title = "Midnight City",
+            subtitle = "M83 · Hurry Up, We're Dreaming",
+            progress = 0.42f,
+            art = sampleArt(),
+            control = null
+        ))
+        addPreview(body, "Timer", h, textDp, radiusDp, NowBarItem(
+            id = "sim|timer",
+            kind = ItemKind.TIMER,
+            title = "Timer",
+            subtitle = "8:00"
+        ))
+        addPreview(body, "Next alarm", h, textDp, radiusDp, NowBarItem(
+            id = "sim|alarm",
+            kind = ItemKind.ALARM,
+            title = "Next alarm",
+            subtitle = "in 1h 05m"
+        ))
+        addPreview(body, "Live update", h, textDp, radiusDp, NowBarItem(
+            id = "sim|live",
+            kind = ItemKind.LIVE,
+            title = "Arriving in 6 min",
+            subtitle = "Driver is 2 streets away",
+            progress = 0.6f
+        ))
+    }
+
+    private fun addPreview(
+        parent: LinearLayout,
+        caption: String,
+        heightDp: Int,
+        textDp: Int,
+        radiusDp: Int,
+        item: NowBarItem
+    ) {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(14), 0, dp(2))
+        }
+        header.addView(
+            TextView(this).apply {
+                text = "$caption  ·  tap to expand"
+                textSize = 12f
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+        )
+        // The switch is the point of this section: it puts the fake on the live pill too.
+        val fake = MaterialSwitch(this).apply {
+            isChecked = NowBarState.isSimulated(item.kind)
+            contentDescription = "Show $caption on the pill"
+            setOnCheckedChangeListener { _, on ->
+                if (on) NowBarState.putSimulated(item) else NowBarState.removeSimulated(item.kind)
+            }
+        }
+        simSwitches.add(fake)
+        header.addView(fake)
+        parent.addView(header, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        // Tapping the example toggles the real renderer between its collapsed and expanded form.
+        val preview = PillView(this).apply {
+            setStyle(TuningStore.DEFAULT_LABEL, textDp, radiusDp)
+            setItems(listOf(item), false, 0)
+            isClickable = true
+            setOnClickListener { view ->
+                val expanded = view.tag != "expanded"
+                view.tag = if (expanded) "expanded" else "collapsed"
+                setItems(listOf(item), expanded, 0)
+            }
+        }
+        parent.addView(
+            preview,
+            LinearLayout.LayoutParams(MATCH_PARENT, dp(heightDp))
+        )
+    }
+
+    /** Colourful stand-in for album art, so every artwork treatment is visible. */
+    private fun sampleArt(): android.graphics.Bitmap {
+        val size = 96
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            size,
+            size,
+            android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = Canvas(bitmap)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = android.graphics.LinearGradient(
+                0f, 0f, size.toFloat(), size.toFloat(),
+                intArrayOf(Color.parseColor("#FF7C4DFF"), Color.parseColor("#FF00BFA5")),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, size.toFloat(), size.toFloat(), paint)
+        return bitmap
+    }
+
+    /** Switches in the fake-activity section, so "Stop all fakes" can reset them. */
+    private val simSwitches = ArrayList<com.google.android.material.materialswitch.MaterialSwitch>()
+
+    private fun toolingCard() {
         val body = card("Test tooling", "Temporary while the layout is being dialled in")
         button(body, "Open floating tuner") {
             try {
@@ -258,13 +770,41 @@ class SettingsActivity : AppCompatActivity() {
                 Log.e("could not start tuner", t)
             }
         }
+        // The hook lives in SystemUI, so it only picks up a new build after SystemUI restarts.
+        button(body, "Restart SystemUI") {
+            Thread { RootShell.run("killall com.android.systemui") }.start()
+        }
         button(body, "Reset to defaults") { reset() }
     }
 
-    // ------------------------------------------------------------------ rows
+    // ------------------------------------------------------------------- rows
 
     private fun rowParams(): LinearLayout.LayoutParams =
-        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(12) }
+        LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(14) }
+
+    private fun preview(parent: LinearLayout): SurfacePreview {
+        val view = SurfacePreview(this)
+        view.setColors(
+            themeColor(androidx.appcompat.R.attr.colorPrimary),
+            themeColor(com.google.android.material.R.attr.colorOnPrimary)
+        )
+        parent.addView(
+            view,
+            LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(16) }
+        )
+        return view
+    }
+
+    private fun caption(parent: LinearLayout): TextView {
+        val view = TextView(this).apply {
+            textSize = 12f
+            gravity = Gravity.CENTER_HORIZONTAL
+            setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            setPadding(0, dp(6), 0, 0)
+        }
+        parent.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        return view
+    }
 
     private fun switchRow(
         parent: LinearLayout,
@@ -278,9 +818,21 @@ class SettingsActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        texts.addView(TextView(this).apply { text = title; textSize = 15f })
+        texts.addView(
+            TextView(this).apply {
+                text = title
+                textSize = 15f
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
+            }
+        )
         if (subtitle != null) {
-            texts.addView(TextView(this).apply { text = subtitle; textSize = 12f; alpha = 0.7f })
+            texts.addView(
+                TextView(this).apply {
+                    text = subtitle
+                    textSize = 12f
+                    setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+                }
+            )
         }
         row.addView(texts, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         val toggle = MaterialSwitch(this).apply { isChecked = checked }
@@ -302,15 +854,22 @@ class SettingsActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         headers.addView(
-            TextView(this).apply { text = title; textSize = 15f },
+            TextView(this).apply {
+                text = title
+                textSize = 15f
+                setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurface))
+            },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
-        val valueView = TextView(this).apply { textSize = 14f; alpha = 0.7f }
+        val valueView = TextView(this).apply {
+            textSize = 14f
+            setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+        }
         headers.addView(valueView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         val start = prefs.getInt(key, default).coerceIn(0, MAX_DP)
         fun render(v: Int) {
-            valueView.text = if (key.endsWith("TopDp") || key.endsWith("LeftDp")) "$v dp (0 = auto)" else "$v dp"
+            valueView.text = if (v < 0) "auto" else "$v dp"
         }
         render(start)
 
@@ -334,7 +893,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun button(parent: LinearLayout, text: String, onClick: () -> Unit) {
-        val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+        val b = MaterialButton(this)
         b.text = text
         b.setOnClickListener { onClick() }
         parent.addView(
@@ -343,29 +902,124 @@ class SettingsActivity : AppCompatActivity() {
         )
     }
 
+    private fun outlinedButton(text: String, onClick: () -> Unit): MaterialButton =
+        MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+            .apply {
+                this.text = text
+                setOnClickListener { onClick() }
+            }
+
     // ---------------------------------------------------------------- actions
 
     private fun refreshStates() {
-        val a11y = NowBarBridge.service != null
-        lockPillStatus.state = if (a11y) "on (accessibility overlay)" else "off"
-        lockPillStatus.on = a11y
-        sbPillStatus.state = if (a11y) "on (same overlay)" else "off"
-        sbPillStatus.on = a11y
-        watcherStatus.state = if (RootKeyguardWatcher.isRunning) "streaming (root)" else "not running"
-        watcherStatus.on = RootKeyguardWatcher.isRunning
-        overlaySwitch.isChecked = OverlayService.running
-        refreshPreview()
+        // Ask the platform, not a static: the bridge field is cleared by a service that is being
+        // torn down, which made this card say "Stopped" while the overlay was drawing fine.
+        val a11y = NowBarBridge.service != null || a11yServiceEnabled()
+        val watcher = RootKeyguardWatcher.isRunning
+        val overlay = OverlayService.running
+        val live = a11y
+
+        heroDot.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (live) ON else OFF)
+        }
+        heroTitle.text = if (live) "Running" else "Stopped"
+        heroSubtitle.text = when {
+            live -> "Pill is drawn by the accessibility overlay"
+            overlay -> "Pill is drawn by the fallback overlay (apps only)"
+            else -> "Enable the accessibility service below to start the pill"
+        }
+
+        a11yStatus.state = if (a11y) "running" else "off"
+        a11yStatus.on = a11y
+        watcherStatus.state = if (watcher) "streaming (root)" else "not running"
+        watcherStatus.on = watcher
+        overlayStatus.state = if (overlay) "running" else "off"
+        overlayStatus.on = overlay
+        overlaySwitch.isChecked = overlay
+        masterSwitch.isChecked = TuningStore.isOn(this, TuningStore.MASTER)
+
+        val listening = listenerGranted()
+        listenerStatus.on = listening
+        listenerStatus.state = if (listening) "granted" else "not granted"
+
+        // The hook lives inside SystemUI, so the only honest check is the SystemUI log. Root can
+        // read it; without the line, the module is not enabled for com.android.systemui yet.
+        if (::hookStatus.isInitialized) {
+            hookStatus.state = "checking…"
+            Thread {
+                val line = RootShell.run("logcat -d -s NowBar -t 400 | grep 'hook:' | tail -1")
+                val attached = line?.contains("attached") == true
+                runOnUiThread {
+                    hookStatus.on = attached
+                    hookStatus.state = when {
+                        attached -> "loaded"
+                        line.isNullOrBlank() -> "not loaded"
+                        else -> "off (kill switch)"
+                    }
+                }
+            }.start()
+        }
+
+        refreshPreviews()
     }
 
-    private fun refreshPreview() {
-        if (!::preview.isInitialized) return
-        preview.update(
-            prefs.getInt("widthDp", TuningStore.DEFAULT_WIDTH_DP),
-            prefs.getInt("heightDp", TuningStore.DEFAULT_HEIGHT_DP),
-            prefs.getInt("radiusDp", TuningStore.DEFAULT_RADIUS_DP),
-            prefs.getInt("textDp", TuningStore.DEFAULT_TEXT_DP),
-            prefs.getString("label", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
+    private fun refreshPreviews() {
+        if (!::lockPreview.isInitialized) return
+        val label = prefs.getString("label", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
+        val lockW = prefs.getInt("widthDp", TuningStore.DEFAULT_WIDTH_DP)
+        val lockH = prefs.getInt("heightDp", TuningStore.DEFAULT_HEIGHT_DP)
+        val lockR = prefs.getInt("radiusDp", TuningStore.DEFAULT_RADIUS_DP)
+        val lockT = prefs.getInt("textDp", TuningStore.DEFAULT_TEXT_DP)
+        lockPreview.update(lockW, lockH, lockR, lockT, label)
+        lockCaption.text = "$lockW × $lockH dp"
+
+        val sbW = prefs.getInt("sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP)
+        val sbH = prefs.getInt("sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP)
+        sbPreview.update(
+            sbW,
+            sbH,
+            prefs.getInt("sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP),
+            prefs.getInt("sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP),
+            label
         )
+        sbCaption.text = "$sbW × $sbH dp"
+
+        val popW = prefs.getInt("popupWidthDp", TuningStore.DEFAULT_POPUP_WIDTH_DP)
+        val popH = prefs.getInt("popupHeightDp", TuningStore.DEFAULT_POPUP_HEIGHT_DP)
+        popupPreview.update(
+            popW,
+            popH,
+            prefs.getInt("popupRadiusDp", TuningStore.DEFAULT_POPUP_RADIUS_DP),
+            prefs.getInt("popupTextDp", TuningStore.DEFAULT_POPUP_TEXT_DP),
+            label
+        )
+        popupCaption.text = "$popW × $popH dp"
+    }
+
+    /** True when this app is allowed to read ongoing notifications. */
+    /** True when the system lists our accessibility service as enabled. */
+    private fun a11yServiceEnabled(): Boolean = try {
+        val manager = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
+        val me = ComponentName(this, NowBarA11yService::class.java)
+        manager.getEnabledAccessibilityServiceList(
+            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
+        ).any { info ->
+            val service = info.resolveInfo?.serviceInfo ?: return@any false
+            service.packageName == me.packageName && service.name == me.className
+        }
+    } catch (t: Throwable) {
+        Log.w("accessibility state unreadable", t)
+        false
+    }
+
+    private fun listenerGranted(): Boolean = try {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.isNotificationListenerAccessGranted(
+            ComponentName(this, NowBarNotifications::class.java)
+        )
+    } catch (t: Throwable) {
+        false
     }
 
     private fun themeColor(attr: Int): Int {
@@ -431,9 +1085,15 @@ class SettingsActivity : AppCompatActivity() {
     /** Title on the left, state on the right, with a coloured dot in front of the state. */
     private class StatusRow(context: Context) : LinearLayout(context) {
 
-        private val titleView = TextView(context).apply { textSize = 15f }
+        private val titleView = TextView(context).apply {
+            textSize = 15f
+            setTextColor(context.themeColor(com.google.android.material.R.attr.colorOnSurface))
+        }
         private val dot = View(context)
-        private val stateView = TextView(context).apply { textSize = 13f; alpha = 0.7f }
+        private val stateView = TextView(context).apply {
+            textSize = 13f
+            setTextColor(context.themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+        }
 
         var title: String
             get() = titleView.text.toString()
@@ -468,23 +1128,25 @@ class SettingsActivity : AppCompatActivity() {
             (v * context.resources.displayMetrics.density + 0.5f).toInt()
     }
 
-    /** Draws the lockscreen pill at its configured shape, scaled down to the card width. */
-    private class PillPreview(context: Context) : View(context) {
+    /**
+     * Draws one surface at its configured shape, scaled down to the card width and capped in
+     * height, so a 3× expanded popup still fits in the preview row.
+     */
+    private class SurfacePreview(context: Context) : View(context) {
+
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val text = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.CENTER
+        }
+        private val rect = RectF()
+        private val density = resources.displayMetrics.density
 
         private var widthDp = TuningStore.DEFAULT_WIDTH_DP
         private var heightDp = TuningStore.DEFAULT_HEIGHT_DP
         private var radiusDp = TuningStore.DEFAULT_RADIUS_DP
         private var textDp = TuningStore.DEFAULT_TEXT_DP
         private var label = TuningStore.DEFAULT_LABEL
-
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
-            color = Color.WHITE
-        }
-        private val rect = RectF()
-        private val density = resources.displayMetrics.density
 
         fun setColors(fillColor: Int, textColor: Int) {
             fill.color = fillColor
@@ -503,35 +1165,57 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         private fun dp(v: Float) = v * density
-        private fun naturalW() = dp(widthDp.toFloat()).coerceAtLeast(1f)
-        private fun naturalH() = dp(heightDp.toFloat()).coerceAtLeast(1f)
 
-        private fun scaleFor(available: Float): Float =
-            if (naturalW() > available) available / naturalW() else 1f
+        /** Scale that fits both the card width and the 72 dp preview height. */
+        private fun scaleFor(availableW: Float): Float {
+            val naturalW = dp(widthDp.toFloat()).coerceAtLeast(1f)
+            val naturalH = dp(heightDp.toFloat()).coerceAtLeast(1f)
+            val byWidth = if (naturalW > availableW) availableW / naturalW else 1f
+            val byHeight = if (naturalH > dp(72f)) dp(72f) / naturalH else 1f
+            return minOf(byWidth, byHeight)
+        }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val available = MeasureSpec.getSize(widthMeasureSpec) - dp(0f)
+            val available = MeasureSpec.getSize(widthMeasureSpec).toFloat()
             val s = scaleFor(available)
-            val h = (naturalH() * s + dp(16f)).toInt().coerceAtLeast((dp(24f)).toInt())
-            setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), h)
+            val h = (dp(heightDp.toFloat()).coerceAtLeast(1f) * s + dp(8f)).toInt()
+            setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), h.coerceAtLeast(1))
         }
 
         override fun onDraw(canvas: Canvas) {
             try {
                 val s = scaleFor(width.toFloat())
-                val w = naturalW() * s
-                val h = naturalH() * s
+                val w = dp(widthDp.toFloat()).coerceAtLeast(1f) * s
+                val h = dp(heightDp.toFloat()).coerceAtLeast(1f) * s
                 val left = (width - w) / 2f
                 val top = (height - h) / 2f
-                val radius = if (radiusDp > 0) dp(radiusDp.toFloat()) * s else h / 2f
+                val radius = if (radiusDp > 0) minOf(dp(radiusDp.toFloat()) * s, h / 2f) else h / 2f
                 rect.set(left, top, left + w, top + h)
                 canvas.drawRoundRect(rect, radius, radius, fill)
+
                 text.textSize = dp(textDp.toFloat()) * s
+                val maxW = w - dp(12f)
+                val shown = if (text.measureText(label) > maxW && maxW > 0f) {
+                    TextUtils.ellipsize(label, text, maxW, TextUtils.TruncateAt.END).toString()
+                } else {
+                    label
+                }
                 val baseline = top + h / 2f - (text.descent() + text.ascent()) / 2f
-                canvas.drawText(label, left + w / 2f, baseline, text)
+                canvas.drawText(shown, left + w / 2f, baseline, text)
             } catch (t: Throwable) {
-                Log.w("PillPreview.onDraw threw", t)
+                Log.w("SurfacePreview.onDraw threw", t)
             }
         }
+    }
+}
+
+/** Theme attribute lookup used by the small widgets above, which have no Activity context. */
+private fun Context.themeColor(attr: Int): Int {
+    val value = TypedValue()
+    return try {
+        if (!theme.resolveAttribute(attr, value, true)) Color.GRAY
+        else if (value.resourceId != 0) getColor(value.resourceId) else value.data
+    } catch (t: Throwable) {
+        Color.GRAY
     }
 }

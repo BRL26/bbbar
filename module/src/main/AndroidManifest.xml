@@ -12,6 +12,20 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BBBar">
 
+        <!-- LSPosed prototype: entry class is listed in assets/xposed_init. -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="bbbar prototype: draws the pill inside SystemUI" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
         <activity
             android:name=".SettingsActivity"
             android:exported="true"
@@ -53,6 +67,18 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/nowbar_a11y" />
+        </service>
+
+        <!-- Reads ongoing notifications to build media / timer / live items. Granted by the
+             user under Settings -> Notifications -> Device & app notifications. -->
+        <service
+            android:name=".NowBarNotifications"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <service

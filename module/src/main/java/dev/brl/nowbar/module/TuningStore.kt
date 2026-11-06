@@ -22,6 +22,12 @@ object TuningStore {
     const val FEATURE_ALARM = "featureAlarm"
     const val FEATURE_LIVE = "featureLive"
 
+    /**
+     * The root logcat watcher: the instant lock/unlock trigger. Off leaves the 1 s poll and the
+     * broadcasts as the only triggers, so a handover can be up to a second late.
+     */
+    const val ROOT_WATCHER = "rootWatcher"
+
     /** Which item wins, highest first. Comma separated: media,timers,live by default. */
     const val RANK_ORDER = "rankOrder"
     const val DEFAULT_RANK_ORDER = "media,timers,alarm,live"
@@ -33,19 +39,29 @@ object TuningStore {
     const val BLUR_STRENGTH = "blurStrength" // 1..10, how hard the artwork blur is
     const val ART_TINT_STRENGTH = "artTintStrength" // 0..100, how opaque the tint over art is
 
-    /** What a surface does when no item is active: placeholder text, a logo mark, or nothing. */
-    const val EMPTY_MODE = "emptyMode"
+    /** The idle line. Also decides whether an idle status bar pill is drawn at all. */
+    const val LABEL = "label"
 
     /** Long lines scroll sideways instead of being cut off. */
     const val SCROLL_TEXT = "scrollText"
 
-    fun emptyMode(context: Context): String {
+    /**
+     * What an idle status bar pill says: the label, as typed. A blank label means there is nothing
+     * to say, so no pill is drawn until an activity starts.
+     *
+     * This replaced an explicit Text / Logo / Hide switch. That switch was a stored state nothing
+     * ever reset, so it could sit on "Hide" and make a working bar look dead.
+     */
+    fun idleLabel(context: Context): String {
         return try {
-            prefs(context).getString(EMPTY_MODE, "placeholder") ?: "placeholder"
+            (prefs(context).getString(LABEL, DEFAULT_LABEL) ?: "").trim()
         } catch (t: Throwable) {
-            "placeholder"
+            DEFAULT_LABEL
         }
     }
+
+    /** True when an empty pill has a line to show; a blank label hides the idle pill. */
+    fun showIdle(context: Context): Boolean = idleLabel(context).isNotEmpty()
 
     fun scrollText(context: Context): Boolean = isOn(context, SCROLL_TEXT)
 

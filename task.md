@@ -131,9 +131,57 @@ Enable / disable:
 - [x] Art treatment: normal / tinted / blurred / both, blur strength and tint intensity sliders,
       cropping decided by aspect (never stretched)
 - [x] Next-alarm countdown card, only when the alarm is inside the next hour
-- [x] Idle look is a status bar setting: placeholder line, logo, or hidden
+- [x] Idle look is the placeholder label itself: blank label hides the status bar pill, any text
+      shows it (the Text / Logo / Hide switch is gone - a stored "Hide" was the cause of a bar that
+      looked dead, and the logo option went with it)
 - [x] "Apply settings" button, because the app's own prefs are not the service's live prefs
 - [x] Fake activities from the settings screen drive the real pill
+
+### Keepers, idle rule and width morph (verified on the device)
+- [x] **Idle rule**: `TuningStore.idleLabel()` / `showIdle()` — always text, and a blank label is
+      what hides the idle status bar pill. The switch that could sit on "Hide" is removed from the
+      Items card (it now explains the label instead), and `emptyForStatus()` / `applyContent()` /
+      `PillView` all read the same rule
+- [x] **Suppressed handover no longer strands the pill**: `slideLockPillOut`, `transitionToLocked`
+      and `onScreenOff` schedule a forced resync 320 ms after `handoverAllowed()` said no
+- [x] **Window watchdog** in the service: every 2.5 s it compares wanted vs attached windows
+      (`lockPill` / `sbPill`), repairs a mismatch that survives two checks, re-adds a missing
+      surface, removes one that should not be up, and drops a detached popup
+- [x] **Root keeper**: detached root `sh` loop (`/data/local/tmp/bbbar-watchdog.sh`) that restores
+      `enabled_accessibility_services` within 20 s. Proved on the device: app killed and the
+      service dropped (`enabled_accessibility_services = null`) → loop wrote it back, SystemUI-free
+      pill window came back on its own (`sb pill added`, 1 window)
+- [x] **Graceful stop is respected**: `wasConnected` is set on connect and cleared in `onDestroy`,
+      so switching the service off by hand is not undone; a crash never reaches `onDestroy` and is
+      repaired
+- [x] **Alarm fallback** (`NowBarWatchdog` + `WatchdogReceiver`, boot/update re-arm). Learned the
+      hard way that `setInexactRepeating` is too lazy to be the primary keeper: it sat in a batching
+      window with `origWhen` in the past and never fired inside 75 s
+- [x] **Width morph**: the status bar pill animates its width (230 ms, decelerate) instead of
+      snapping, retargets mid-flight, and does not restart when several prefs land in one applyAll
+      (`sbWidthTarget`); `applySbTuning` keeps the current width for its first frame so the pill
+      never flashes to maximum
+- [x] **Hook status was wrong, not the hook**: the row took the *last* `hook:` log line (which is
+      `hook: icon area child …`) — now it greps `attached|kill switch` over the whole buffer
+
+### Status rows and switches (verified on the device)
+- [x] **Status hero and rows read live state**: master switch, `NowBarBridge.service`,
+      `NowBarA11yService.windowsUp()`. The old version OR-ed in "the service is listed as enabled",
+      so it said Running with the pill switched off and Stopped while it was drawing
+- [x] Rows re-read every 1.5 s while the screen is open (`ticker` + `onPause`), instead of only on
+      resume
+- [x] **Root watcher switch** (`TuningStore.ROOT_WATCHER`): stops and starts
+      `RootKeyguardWatcher` from `applyAll` → `syncRootWatcher()`, also with the pill switched off
+- [x] Watcher row tells `streaming (root)` from `reconnecting` from `off (switch)`
+      (`RootKeyguardWatcher.isStreaming` = running *and* the `su` child is open)
+- [x] **Hook row now has a real signal**: the hook writes `Settings.Global → bbbar_hook_beat`
+      (`SystemClock.elapsedRealtime()`) at attach and every 30 s (SystemUI has
+      `WRITE_SECURE_SETTINGS` granted on this build). Fresh beat → loaded, stale → not loaded with
+      the age, kill-switch file → off. Logcat is only the fallback for an older hook build.
+      Verified: `beat: 16268036`, `hook: icon area found
+      (com.android.systemui.statusbar.AlphaOptimizedFrameLayout)`, row reads **loaded**
+- [x] The pill survives a SystemUI restart (`am crash com.android.systemui`) - one window before
+      and after, because it is our own overlay
 
 ## Next
 

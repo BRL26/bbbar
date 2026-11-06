@@ -57,6 +57,9 @@ class NowBarA11yService : AccessibilityService() {
         const val EXPAND_MS = 280L
         const val COLLAPSE_MS = 220L
 
+        /** Width morph of the status bar pill when its line changes. */
+        const val WIDTH_MS = 230L
+
         /** Failsafe poll while the phone is unlocked. */
         const val POLL_MS = 1000L
 
@@ -81,6 +84,12 @@ class NowBarA11yService : AccessibilityService() {
 
         /** While a root keyguard signal is pending confirmation, check this often (one frame). */
         const val CONFIRM_POLL_MS = 8L
+
+        /** How often the watchdog checks that the windows it means to draw are actually up. */
+        const val WATCHDOG_MS = 2500L
+
+        /** Delay before the watchdog looks again after a suppressed handover. */
+        const val RESYNC_MS = 320L
 
         /** Give up on a root signal that never turns into a keyguard change after this long. */
         const val CONFIRM_MS = 1500L
@@ -136,6 +145,12 @@ class NowBarA11yService : AccessibilityService() {
     private var sbParams: WindowManager.LayoutParams? = null
     private var sbAnimator: ValueAnimator? = null
 
+    /** The width morph, kept apart from [sbAnimator] (which slides/fades the whole window). */
+    private var sbWidthAnimator: ValueAnimator? = null
+
+    /** Width the running morph is heading for; -1 when no morph is running. */
+    private var sbWidthTarget = -1
+
     private var popupPill: PillView? = null
     private var popupParams: WindowManager.LayoutParams? = null
     private var popupAnimator: ValueAnimator? = null
@@ -179,6 +194,29 @@ class NowBarA11yService : AccessibilityService() {
 
     /** uptimeMillis of the last completed handover, to swallow duplicated triggers. */
     private var lastHandoverAt = 0L
+
+    /** Last surface mismatch the watchdog saw, and how often it has repeated. */
+    private var watchSignature = ""
+    private var watchStreak = 0
+
+    /**
+     * Keeps a pill on screen.
+     *
+     * Anything that leaves the service with no window - a handover suppressed as a duplicate, a
+     * surface switched back on in the settings app, a window the system dropped after a display or
+     * SystemUI change, a half-finished repair - is put right here within a couple of seconds,
+     * instead of staying blank until some unrelated event happened to call applyAll().
+     */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            try {
+                watchdogCheck(force = false)
+            } catch (t: Throwable) {
+                Log.w("watchdog check failed", t)
+            }
+            handler.postDelayed(this, WATCHDOG_MS)
+        }
+    }
 
     /** Places the keyguard pill once the screen-off animation has finished. */
     private val showLockPillAfterScreenOff = object : Runnable {
@@ -309,9 +347,16 @@ class NowBarA11yService : AccessibilityService() {
             lastLocked = isKeyguardLocked()
             if (lastLocked == true) armBurst()
             NowBarBridge.service = this
+            // Remembered so the watchdog can tell a crash from the owner switching the service off.
+            prefs.edit().putBoolean(NowBarWatchdog.WAS_CONNECTED, true).apply()
+            // Make sure the root keeper loop is running: it is what restores this service after
+            // the process is killed and Android drops it from enabled accessibility services.
+            RootKeeper.startAsync()
             NowBarState.onChange = { applyContent() }
             handler.post(timerTick)
             updateSurfaces()
+            handler.removeCallbacks(watchdog)
+            handler.postDelayed(watchdog, WATCHDOG_MS)
             handler.post(keyguardPoll)
             Log.i("accessibility overlay connected (locked=$lastLocked)")
         } catch (t: Throwable) {
@@ -365,9 +410,16 @@ class NowBarA11yService : AccessibilityService() {
         try {
             handler.removeCallbacks(confirmPoll)
             handler.removeCallbacks(keyguardPoll)
+            handler.removeCallbacks(watchdog)
         } catch (t: Throwable) {
         }
         if (NowBarBridge.service === this) NowBarBridge.service = null
+        try {
+            // A graceful stop is the owner's choice: the watchdog must not undo it.
+            prefs.edit().putBoolean(NowBarWatchdog.WAS_CONNECTED, false).apply()
+        } catch (t: Throwable) {
+            Log.w("watchdog flag clear failed", t)
+        }
         removePopup()
         removeLockPill()
         removeSbPill()
@@ -407,8 +459,27 @@ class NowBarA11yService : AccessibilityService() {
      * Root logcat watcher: the earliest signal the platform gives an app that the keyguard is
      * going away. Without root it logs a failure and the poll above remains the fallback.
      */
+    /**
+     * Follows the owner's switch: starts the root watcher, or stops it so its `su` child and the
+     * logcat stream go away. Reading is idempotent, so this is called on every apply as well.
+     */
+    private fun syncRootWatcher() {
+        try {
+            val want = TuningStore.isOn(this, TuningStore.ROOT_WATCHER)
+            if (want && !RootKeyguardWatcher.isRunning) {
+                startRootWatcher()
+            } else if (!want && RootKeyguardWatcher.isRunning) {
+                RootKeyguardWatcher.stop()
+                Log.i("root keyguard watcher switched off by the owner")
+            }
+        } catch (t: Throwable) {
+            Log.w("root watcher sync failed", t)
+        }
+    }
+
     private fun startRootWatcher() {
         try {
+            if (!TuningStore.isOn(this, TuningStore.ROOT_WATCHER)) return
             RootKeyguardWatcher.start(onLine = { line ->
                 handler.post { onRootKeyguardSignal(line) }
             })
@@ -735,7 +806,10 @@ class NowBarA11yService : AccessibilityService() {
         lastScreenOffAt = SystemClock.uptimeMillis()
         // Already locked with nothing to swap: a second trigger must not add a second pill.
         if (lockPill != null && sbPill == null) return
-        if (!handoverAllowed()) return
+        if (!handoverAllowed()) {
+            scheduleResync()
+            return
+        }
         transitioning = true
         handler.postDelayed({ transitioning = false }, 250L)
         try {
@@ -781,6 +855,8 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     private fun removeSbPillNow() {
+        sbWidthAnimator?.cancel()
+        sbWidthAnimator = null
         val view = sbPill ?: return
         removeImmediate(view)
         sbPill = null
@@ -805,7 +881,10 @@ class NowBarA11yService : AccessibilityService() {
     private fun slideLockPillOut() {
         // Already handed over: a duplicated trigger must not tear the pill down and put it back.
         if (lockPill == null && sbPill != null) return
-        if (!handoverAllowed()) return
+        if (!handoverAllowed()) {
+            scheduleResync()
+            return
+        }
         // Unlocked before the deferred keyguard pill landed: do not put it up now.
         handler.removeCallbacks(showLockPillAfterScreenOff)
         transitioning = true
@@ -827,7 +906,10 @@ class NowBarA11yService : AccessibilityService() {
     /** Lock handover, also with no animation: status pill removed, keyguard pill put in place. */
     private fun transitionToLocked() {
         if (sbPill == null && lockPill != null) return
-        if (!handoverAllowed()) return
+        if (!handoverAllowed()) {
+            scheduleResync()
+            return
+        }
         transitioning = true
         handler.postDelayed({ transitioning = false }, 200L)
         try {
@@ -901,6 +983,114 @@ class NowBarA11yService : AccessibilityService() {
         }
         lastHandoverAt = now
         return true
+    }
+
+    /**
+     * A suppressed handover used to just return, which - when the earlier one had already taken
+     * its window down - left the screen with no pill at all, and nothing left to retry. Look again
+     * once the duplicate has had time to settle.
+     */
+    private fun scheduleResync() {
+        try {
+            handler.postDelayed({
+                try {
+                    watchdogCheck(force = true)
+                } catch (t: Throwable) {
+                    Log.w("handover resync failed", t)
+                }
+            }, RESYNC_MS)
+        } catch (t: Throwable) {
+            Log.w("resync scheduling failed", t)
+        }
+    }
+
+    /**
+     * Compares the windows on screen with the ones this lock state asks for and repairs a
+     * difference that persists. [force] skips the two-strike rule for the resync after a
+     * suppressed handover, where the state is already known to be wrong.
+     */
+    private fun watchdogCheck(force: Boolean) {
+        if (!TuningStore.isOn(this, TuningStore.MASTER)) {
+            watchSignature = ""
+            watchStreak = 0
+            return
+        }
+        if (transitioning) return
+        // The keyguard pill lands on a deliberate delay after screen-off; do not race that.
+        if (handler.hasCallbacks(showLockPillAfterScreenOff)) return
+
+        val locked = lastLocked ?: isKeyguardLocked().also { lastLocked = it }
+        val items = NowBarState.items(this)
+        val wantLock = locked && enabled(TuningStore.SURFACE_LOCK) && items.isNotEmpty()
+        // The status bar pill also stands in for the idle line, which only a blank label removes.
+        val wantSb = !locked && enabled(TuningStore.SURFACE_STATUS) &&
+            (items.isNotEmpty() || TuningStore.showIdle(this))
+        val haveLock = lockPill?.isAttachedToWindow == true
+        val haveSb = sbPill?.isAttachedToWindow == true
+
+        if (wantLock == haveLock && wantSb == haveSb) {
+            watchSignature = ""
+            watchStreak = 0
+            return
+        }
+
+        val signature = "locked=$locked wantLock=$wantLock haveLock=$haveLock " +
+            "wantSb=$wantSb haveSb=$haveSb"
+        if (!force) {
+            // One disagreement is normal: a window is added or removed across a frame or two.
+            if (signature != watchSignature) {
+                watchSignature = signature
+                watchStreak = 1
+                Log.i("watchdog: surfaces disagree ($signature) - checking again")
+                return
+            }
+            watchStreak++
+            if (watchStreak < 2) return
+        }
+        watchSignature = ""
+        watchStreak = 0
+        Log.i("watchdog: repairing surfaces ($signature)")
+        try {
+            if (!wantLock && lockPill != null) removeLockPill()
+            if (!wantSb && sbPill != null) removeSbPill()
+            if (wantLock && !haveLock) {
+                lockPill?.let {
+                    detachDetached(it)
+                    lockPill = null
+                    lockParams = null
+                }
+                addLockPill(fadeIn = true)
+            }
+            if (wantSb && !haveSb) {
+                sbPill?.let {
+                    detachDetached(it)
+                    sbPill = null
+                    sbParams = null
+                }
+                addSbPill(fadeIn = true)
+            }
+            // A popup whose window is gone cannot be collapsed back into the pill: drop the state
+            // so the next tap opens it properly instead of doing nothing.
+            val pop = popupPill
+            if (pop != null && !pop.isAttachedToWindow) {
+                popupAnimator?.cancel()
+                popupAnimator = null
+                popupPill = null
+                popupParams = null
+                Log.i("watchdog: dropped a detached popup")
+            }
+        } catch (t: Throwable) {
+            Log.w("watchdog repair failed", t)
+        }
+    }
+
+    /** Removes a window the watchdog found detached, ignoring the error that means it is gone. */
+    private fun detachDetached(view: View) {
+        try {
+            windowManager.removeViewImmediate(view)
+        } catch (t: Throwable) {
+            // Already gone: nothing to remove.
+        }
     }
 
     private fun cancelAnimator(slot: Int) {
@@ -1164,14 +1354,46 @@ class NowBarA11yService : AccessibilityService() {
         }
     }
 
-    /** Width of the status bar window follows its line: the tuned width is a maximum. */
+    /**
+     * Width of the status bar window follows its line: the tuned width is a maximum.
+     *
+     * The change is animated rather than snapped: a new title, a timer appearing or the card
+     * going away makes the pill flow to its new width (and back) like the same shape stretching,
+     * which is what a one-line pill reads as. Short, so it stays in step with the card animations.
+     */
     private fun fitSbWidth(view: PillView) {
         try {
             val lp = sbParams ?: return
             val wanted = view.preferredWidth(dp(Tuning.sb(this).widthDp), lp.height)
-            if (lp.width == wanted) return
-            lp.width = wanted
-            windowManager.updateViewLayout(view, lp)
+            if (lp.width == wanted && sbWidthAnimator?.isRunning != true) return
+            // Several preferences can land in the same applyAll: an animation already heading for
+            // this width is left alone instead of being restarted from its current frame.
+            if (wanted == sbWidthTarget && sbWidthAnimator?.isRunning == true) return
+            // A different line arrived mid-morph: retarget from the width currently on screen.
+            sbWidthAnimator?.cancel()
+            val from = lp.width
+            sbWidthTarget = wanted
+            Log.i("sb width morph: ${from}px -> ${wanted}px (max ${dp(Tuning.sb(this).widthDp)}px)")
+            val anim = ValueAnimator.ofInt(from, wanted).apply {
+                duration = WIDTH_MS
+                interpolator = DecelerateInterpolator(1.4f)
+                addUpdateListener {
+                    if (sbPill !== view || sbParams !== lp) return@addUpdateListener
+                    lp.width = it.animatedValue as Int
+                    try {
+                        windowManager.updateViewLayout(view, lp)
+                    } catch (t: Throwable) {
+                        Log.w("sb width frame failed", t)
+                    }
+                }
+            }
+            anim.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (sbWidthAnimator === anim) sbWidthTarget = -1
+                }
+            })
+            sbWidthAnimator = anim
+            anim.start()
         } catch (t: Throwable) {
             Log.w("sb fit failed", t)
         }
@@ -1180,6 +1402,8 @@ class NowBarA11yService : AccessibilityService() {
     private fun removeSbPill() {
         sbAnimator?.cancel()
         sbAnimator = null
+        sbWidthAnimator?.cancel()
+        sbWidthAnimator = null
         val view = sbPill ?: return
         try {
             windowManager.removeView(view)
@@ -1196,10 +1420,16 @@ class NowBarA11yService : AccessibilityService() {
         val lp = sbParams ?: return
         try {
             val t = Tuning.sb(this)
-            lp.width = view.preferredWidth(dp(t.widthDp), lp.height)
-            placeSb(lp, t)
+            // Style first, so the width is measured from the new label and text size, not the old.
             view.setStyle(t.label, t.textDp, t.radiusDp)
+            val onScreen = lp.width
+            placeSb(lp, t)
+            // Position and height change at once, the width flows to its new value below. Keeping
+            // the current width for that first frame is what stops the pill flashing wide when a
+            // preference lands.
+            lp.width = onScreen
             windowManager.updateViewLayout(view, lp)
+            fitSbWidth(view)
             Log.i("sb pill updated: ${t.widthDp}x${t.heightDp}dp at x=${lp.x} y=${lp.y}px")
         } catch (t: Throwable) {
             Log.w("sb applyTuning failed", t)
@@ -1501,6 +1731,8 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     private fun applyAll() {
+        // Before the master check: the watcher switch has to work with the pill switched off too.
+        syncRootWatcher()
         if (!TuningStore.isOn(this, TuningStore.MASTER)) {
             removeAllSurfaces()
             return
@@ -1533,11 +1765,11 @@ class NowBarA11yService : AccessibilityService() {
     private fun emptyForLock(): Boolean = NowBarState.items(this).isEmpty()
 
     /**
-     * Only the status bar pill can be configured for the idle case: it may show the placeholder,
-     * the logo, or nothing at all. The other surfaces are never placeholder surfaces.
+     * Only the status bar pill has an idle case, and it is the label itself: an idle pill with a
+     * blank label is not drawn. The lock pill and the popup are never placeholder surfaces.
      */
     private fun emptyForStatus(): Boolean =
-        NowBarState.items(this).isEmpty() && TuningStore.emptyMode(this) == "hidden"
+        NowBarState.items(this).isEmpty() && !TuningStore.showIdle(this)
 
     /** Pushes the current item into whichever pills exist; each surface decides what it shows. */
     private fun applyContent() {
@@ -1549,11 +1781,11 @@ class NowBarA11yService : AccessibilityService() {
             val items = NowBarState.items(this)
             if (items.isEmpty()) {
                 // Nothing active: the lock pill and the popup have nothing to draw and go away.
-                // The status bar pill alone can keep its configured idle look (text, logo) or be
-                // removed when the owner chose "hide".
+                // The status bar pill keeps the placeholder label, and only disappears when that
+                // label is blank - there is no separate idle switch to leave in the wrong state.
                 removeLockPill()
                 removePopup()
-                if (TuningStore.emptyMode(this) == "hidden") removeSbPill() else sbPill?.let { view ->
+                if (!TuningStore.showIdle(this)) removeSbPill() else sbPill?.let { view ->
                     view.setItems(emptyList(), false, 0)
                     // Back to the idle line: the pill has to shrink with it, otherwise it keeps
                     // the width of the card that just went away.
@@ -1633,6 +1865,20 @@ class NowBarA11yService : AccessibilityService() {
             false -> if (sbPill == null) addSbPill(fadeIn = true)
             null -> Unit
         }
+    }
+
+    /**
+     * How many of this service's own windows are actually on screen. The settings screen runs in
+     * the same process, so it reads this directly instead of guessing from a flag.
+     */
+    fun windowsUp(): Int = try {
+        var n = 0
+        if (lockPill?.isAttachedToWindow == true) n++
+        if (sbPill?.isAttachedToWindow == true) n++
+        if (popupPill?.isAttachedToWindow == true) n++
+        n
+    } catch (t: Throwable) {
+        0
     }
 
     /** Every item in ranking order, rotated so the swiped-to card leads. */

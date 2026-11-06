@@ -400,20 +400,9 @@ class PillView(context: Context) : View(context) {
         if (w <= 0f || h <= 0f) return
         val r = minOf(radius, h / 2f)
 
-        if (item == null) {
-            when (TuningStore.emptyMode(context)) {
-                "hidden" -> return
-                "logo" -> {
-                    canvas.save()
-                    clipToCard(canvas, area, r)
-                    canvas.drawColor(fill.color)
-                    drawLogo(canvas, area)
-                    canvas.restore()
-                    canvas.drawRoundRect(area, r, r, stroke)
-                    return
-                }
-            }
-        }
+        // The idle line is the label itself; a blank label means the owner has nothing to say,
+        // so the card is not drawn at all rather than left as an empty shape.
+        if (item == null && TuningStore.idleLabel(context).isEmpty()) return
 
         clipToCard(canvas, area, r)
         canvas.drawColor(fill.color)
@@ -743,24 +732,6 @@ class PillView(context: Context) : View(context) {
         Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
     // --------------------------------------------------------------- glyphs
-
-    private fun drawLogo(canvas: Canvas, area: RectF) {
-        try {
-            val barH = (area.height() * 0.14f).coerceAtLeast(dp(3f))
-            val gap = barH * 0.8f
-            val wideW = area.width() * 0.26f
-            val narrowW = wideW * 0.62f
-            val cx = area.centerX()
-            val totalH = barH * 2 + gap
-            val top = area.centerY() - totalH / 2f
-            card.set(cx - wideW / 2f, top, cx + wideW / 2f, top + barH)
-            canvas.drawRoundRect(card, barH / 2f, barH / 2f, progressFill)
-            card.set(cx - narrowW / 2f, top + barH + gap, cx + narrowW / 2f, top + barH * 2 + gap)
-            canvas.drawRoundRect(card, barH / 2f, barH / 2f, progressFill)
-        } catch (t: Throwable) {
-            Log.w("PillView logo failed", t)
-        }
-    }
 
     private fun drawClock(canvas: Canvas, area: RectF) {
         try {

@@ -40,7 +40,13 @@ Two switches, in **Settings → Android status bar**:
 Both are read by SystemUI from `Settings.Global` (writable only through root, which the app uses) and
 watched with a `ContentObserver`, so flipping a switch takes effect without a restart. The hook
 takes effect when SystemUI (re)loads, so the first time needs **Test tooling → Restart SystemUI**, and
-the module must be enabled for `com.android.systemui` in LSPosed. A file kill switch stays available:
+the module must be enabled for `com.android.systemui` in LSPosed. The **Xposed hook** row asks the hook itself: it publishes
+`Settings.Global → bbbar_hook_beat` (SystemUI holds `WRITE_SECURE_SETTINGS` here) every 30 s, and the
+row shows `loaded` when that heartbeat is fresh, `not loaded (last beat Ns ago)` when SystemUI
+restarted without the hook, and `off (kill switch)` when the file exists. A logcat attach line is
+only the fallback for a SystemUI that has not been restarted since this build. Before that it read
+the *last* `hook:` line, which is `hook: icon area child …` — so a loaded hook showed as not loaded,
+and once the log rotated there was nothing to find at all. A file kill switch stays available:
 
 ```bash
 touch /data/local/tmp/bbbar_hook_off   # SystemUI loads with no hook at all
@@ -60,7 +66,11 @@ lands inside the screen-off animation. Tapping a collapsed pill opens its expand
 anywhere outside closes it (taps inside no longer do).
 
 Geometry comes from live window insets (`statusBars` top, `displayCutout`) and the tuned dp values
-below, never from hardcoded screen pixels.
+below, never from hardcoded screen pixels. The status bar pill's width is fitted to its line
+(maximum is the tuned width) and **morphs** to the new width over 230 ms instead of snapping, so a
+new title, a timer appearing or the card going away reads as the same shape stretching. A change
+that arrives mid-morph retargets from the width on screen; a settings change keeps the current
+width for its first frame, so the pill never flashes wide.
 
 ## Unlock/lock detection
 
@@ -75,7 +85,34 @@ below, never from hardcoded screen pixels.
 
 One handover per 400 ms, and a raw `isKeyguardLocked=false` only counts after a streak of
 consecutive reads — both exist because the flag oscillates mid-transition and acting on it made
-the pill vanish and reappear.
+the pill vanish and reappear. A *suppressed* handover now schedules a resync 320 ms later: back
+when it just returned, the earlier handover had already taken its window down and nothing was left
+to retry, which is one of the ways the pill disappeared for good.
+
+## Staying alive
+
+Three keepers, in order of how much they can fix:
+
+1. **Window watchdog** (in the service, every 2.5 s). Compares the windows on screen with the ones
+the lock state asks for and repairs a difference that persists over two checks: a detached window
+is dropped and rebuilt, a surface that should not be up is removed, a detached popup is dropped so
+the next tap opens it properly. It skips while a handover is in flight and while the keyguard pill
+is waiting out `SCREEN_OFF_LOCK_DELAY_MS`.
+2. **Root keeper** (`RootKeeper`) — a `sh` loop under root, `setsid`-detached so it outlives the app
+   process, checking every 20 s that our own component is still in
+   `enabled_accessibility_services` and putting it back with `settings put` when it is not. This is
+   the one that matters after a crash: a killed app is also dropped from that list, and then
+   Android never binds it again — the pill stays off until it is switched back on by hand. Script
+   and log: `/data/local/tmp/bbbar-watchdog.sh`, `.pid`, `.err`.
+3. **Alarm fallback** (`NowBarWatchdog` + `WatchdogReceiver`, every 60 s, re-armed on boot and after
+   an update). Same check plus a forced rebind when the service is listed but not running. Inexact
+   repeating alarms sit in a batching window (`origWhen` in the past, `maxWhenElapsed` in the
+   future), so this one is a backstop, not the primary keeper.
+
+Both the loop and the alarm only repair a drop they did not cause: the service clears
+`wasConnected` on a *graceful* stop, so switching bbbar off in Accessibility stays off, and a crash
+(which never reaches `onDestroy`) leaves the flag set and gets repaired. The root loop also stands
+down while the **Pill enabled** master switch is off.
 
 ## What it shows
 
@@ -120,7 +157,11 @@ dark). Every control writes into the shared `tuning` prefs that the service watc
 live.
 
 - **Status** — running/stopped, the **Pill enabled** master switch, accessibility state, root
-  watcher state, the fallback overlay switch, and a shortcut to Accessibility settings.
+  watcher state and its own on/off switch, the fallback overlay switch, and a shortcut to
+  Accessibility settings. Everything here is read from something that exists: the master switch,
+  the service object (same process), and how many of its windows are attached — so it cannot say
+  "Running" with the master switch off, or "Stopped" while the pill is drawing. The rows re-read
+  every 1.5 s while the screen is open.
 - **Surfaces** — one card each for the lockscreen pill, the status bar pill and the expanded popup,
   each with its own on/off switch, a live scaled preview, a `width × height` caption and the dp
   sliders. Sliders run `0…1000 dp` so nothing is capped; `-1` on a left/top value means *auto*.
@@ -172,6 +213,8 @@ adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.Tu
 ```bash
 adb logcat -s NowBar                 # everything, tag NowBar
 adb logcat -s NowBar | grep handover # unlock/lock swaps and their timings
+adb logcat -s NowBar | grep watchdog # surface repairs and keeper restores
+adb logcat -s NowBar | grep morph    # status bar pill width changes
 ```
 
 Useful lines: `lock handover: … removed in Nms`, `unlock handover: first frame Nms after the
@@ -189,6 +232,8 @@ module/src/main/java/dev/brl/nowbar/module/
   TunerService.kt        floating dev tuner (draggable panel)
   OverlayService.kt      fallback TYPE_APPLICATION_OVERLAY pill
   RootKeyguardWatcher.kt root logcat wakeup stream
+  RootKeeper.kt          root loop that keeps the accessibility service enabled
+  NowBarWatchdog.kt      alarm-based fallback keeper (+ WatchdogReceiver.kt, boot re-arm)
   UserPresentReceiver.kt ACTION_USER_PRESENT → service
   NowBarHook.kt          LSPosed prototype entry (inert, see below)
 ```
@@ -201,7 +246,9 @@ module/src/main/java/dev/brl/nowbar/module/
 - **No per-app allow / deny list yet.** Any app that posts a media session, a chronometer or a
   progress notification becomes a card; individual apps cannot be excluded.
 - **The idle pill is a status bar surface only.** Lockscreen and popup disappear when nothing is
-  active; the status bar pill can show the placeholder line, the logo, or nothing.
+  active. The status bar pill shows the placeholder label, and it is *only* the label that decides
+  this: blank label → no idle pill, any text → pill. The old Text / Logo / Hide switch is gone,
+  because a stored "Hide" looked exactly like a dead bar and nothing ever reset it.
 - **The LSPosed hook only hides**, it never draws or lays out: it sets `alpha` on the status bar's
   notification-icon area children. Everything the pill shows comes from the accessibility overlay,
   which is why a changed Nothing OS build cannot break the pill itself.

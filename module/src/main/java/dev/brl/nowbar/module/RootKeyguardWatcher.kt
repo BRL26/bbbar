@@ -46,6 +46,18 @@ object RootKeyguardWatcher {
     /** True once [start] has been called and the stream has not been stopped. */
     val isRunning: Boolean get() = running
 
+    /**
+     * True while the root log stream is actually open. [isRunning] only says the watcher is
+     * wanted: between a failed stream and its retry it stays true, which is why the settings row
+     * used to claim "streaming" when it was doing nothing.
+     */
+    val isStreaming: Boolean get() = running && process != null
+
+    /** Last thing the watcher said, for the status row. */
+    @Volatile
+    var lastMessage: String = ""
+        private set
+
     /** Starts the watcher once; later calls are ignored. */
     fun start(onLine: (String) -> Unit, onStatus: (String) -> Unit = {}) {
         if (running) return
@@ -123,6 +135,7 @@ object RootKeyguardWatcher {
 
     private fun status(msg: String) {
         try {
+            lastMessage = msg
             Log.i(msg)
             onStatus?.invoke(msg)
         } catch (t: Throwable) {

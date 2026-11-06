@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".NowBarApp"
@@ -43,6 +44,18 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Puts the accessibility service back when the system dropped it, and re-arms itself
+             after a reboot or an app update. -->
+        <receiver
+            android:name=".WatchdogReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="dev.brl.nowbar.module.WATCHDOG" />
             </intent-filter>
         </receiver>
 

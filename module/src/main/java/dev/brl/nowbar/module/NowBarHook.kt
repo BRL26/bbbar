@@ -47,6 +47,15 @@ class NowBarHook : IXposedHookLoadPackage {
         const val KEY_HIDE_ICONS = "bbbar_hide_notif_icons"
         const val KEY_HIDE_CHIPS = "bbbar_hide_live_chips"
 
+        /**
+         * Heartbeat: `SystemClock.elapsedRealtime()` of the last proof that the hook is live in
+         * SystemUI. The settings screen reads it, so "is the hook loaded" no longer depends on a
+         * logcat line - a rotated or cleared log used to make a working hook look missing. Stale by
+         * more than a couple of minutes means SystemUI restarted without the hook.
+         */
+        const val KEY_HOOK_BEAT = "bbbar_hook_beat"
+        private const val BEAT_MS = 30_000L
+
         /** Verified on Nothing OS 5.0: res/layout/status_bar.xml, id 0x7f0b0718. */
         private const val ID_NAME_ICON_AREA = "notification_icon_area"
     }
@@ -56,6 +65,39 @@ class NowBarHook : IXposedHookLoadPackage {
 
     /** Child classes already reported, so the log says each one once. */
     private val reported = HashSet<String>()
+
+    /** Only one heartbeat loop per SystemUI process. */
+    private var beating = false
+
+    /**
+     * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
+     * WRITE_SECURE_SETTINGS on this build, so no extra permission or root is involved.
+     */
+    private fun startHeartbeat(context: Context) {
+        if (beating) return
+        beating = true
+        try {
+            val main = Handler(Looper.getMainLooper())
+            val tick = object : Runnable {
+                override fun run() {
+                    try {
+                        Settings.Global.putLong(
+                            context.contentResolver,
+                            KEY_HOOK_BEAT,
+                            android.os.SystemClock.elapsedRealtime()
+                        )
+                    } catch (t: Throwable) {
+                        Log.w("hook: heartbeat write failed", t)
+                    }
+                    main.postDelayed(this, BEAT_MS)
+                }
+            }
+            main.post(tick)
+        } catch (t: Throwable) {
+            beating = false
+            Log.w("hook: heartbeat start failed", t)
+        }
+    }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -98,6 +140,9 @@ class NowBarHook : IXposedHookLoadPackage {
     private fun attach(statusBar: View) {
         try {
             val context = statusBar.context ?: return
+            // Before the icon-area search on purpose: the hook is loaded either way, and the row
+            // should say so even if the strip could not be identified on a changed build.
+            startHeartbeat(context)
             val area = findIconArea(statusBar)
             if (area == null) {
                 Log.w("hook: notification icon area not found, icons left alone")

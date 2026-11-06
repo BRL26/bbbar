@@ -13,6 +13,9 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.TextPaint
 import android.text.TextUtils
@@ -53,6 +56,15 @@ class SettingsActivity : AppCompatActivity() {
 
         val ON = Color.parseColor("#4CAF50")
         val OFF = Color.parseColor("#8A8A8A")
+
+        /** How often the status rows are re-read while the screen is visible. */
+        const val REFRESH_MS = 1500L
+
+        /** Minimum gap between hook probes (each one is a root shell). */
+        const val HOOK_PROBE_MS = 6000L
+
+        /** A heartbeat older than this means SystemUI restarted without the hook. */
+        const val HOOK_STALE_MS = 120_000L
     }
 
     private lateinit var prefs: SharedPreferences
@@ -71,6 +83,19 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var overlayStatus: StatusRow
     private lateinit var hookStatus: StatusRow
 
+    private val handler = Handler(Looper.getMainLooper())
+
+    /** Uptime of the last hook probe, so the root call is not made on every refresh tick. */
+    private var hookProbedAt = 0L
+    private var hookProbeBusy = false
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            refreshStates()
+            handler.postDelayed(this, REFRESH_MS)
+        }
+    }
+
     private lateinit var lockPreview: SurfacePreview
     private lateinit var sbPreview: SurfacePreview
     private lateinit var popupPreview: SurfacePreview
@@ -88,6 +113,15 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshStates()
+        // The service connects, drops a surface or loses the hook while this screen is open, so
+        // the rows are re-read instead of frozen at the value they had on entry.
+        handler.removeCallbacks(ticker)
+        handler.postDelayed(ticker, REFRESH_MS)
+    }
+
+    override fun onPause() {
+        handler.removeCallbacks(ticker)
+        super.onPause()
     }
 
     // --------------------------------------------------------------- scaffold
@@ -256,6 +290,12 @@ class SettingsActivity : AppCompatActivity() {
 
         watcherStatus = StatusRow(this).apply { title = "Root unlock watcher" }
         body.addView(watcherStatus, rowParams())
+        switchRow(
+            body,
+            "Use the root watcher",
+            "Reads the keyguard log for an instant handover. Off falls back to the 1 s poll.",
+            TuningStore.isOn(this, TuningStore.ROOT_WATCHER)
+        ) { on -> prefs.edit().putBoolean(TuningStore.ROOT_WATCHER, on).apply() }
 
         overlayStatus = StatusRow(this).apply { title = "Draw over apps" }
         body.addView(overlayStatus, rowParams())
@@ -346,7 +386,10 @@ class SettingsActivity : AppCompatActivity() {
         captionView(
             body,
             "Needs the bbbar Xposed module enabled for com.android.systemui, and one SystemUI " +
-                "restart after installing. SystemUI can be restarted from Test tooling below."
+                "restart after installing. Restart it from Test tooling below.\n\n" +
+                "The hook writes a heartbeat every 30 s, and this row follows it: if SystemUI " +
+                "restarts without the hook, the beat goes stale and the row says how long ago. " +
+                "The pill itself is an accessibility overlay and never depends on the hook."
         )
     }
 
@@ -409,14 +452,13 @@ class SettingsActivity : AppCompatActivity() {
         featureSwitch(body, "Timers and stopwatch", "Countdown from the clock app", TuningStore.FEATURE_TIMERS)
         featureSwitch(body, "Next alarm", "Minutes until your next alarm", TuningStore.FEATURE_ALARM)
         featureSwitch(body, "Live updates", "Any app's progress notification", TuningStore.FEATURE_LIVE)
-        // Lock screen and popup simply disappear when idle; only the status bar pill has a look
-        // for that case.
-        choiceRow(
+        // Lock screen and popup simply disappear when idle. The status bar pill keeps the label,
+        // and a blank label is what hides it - so there is no separate switch that can sit in the
+        // wrong state and make a working bar look dead.
+        captionView(
             body,
-            "Status bar when nothing is showing",
-            TuningStore.EMPTY_MODE,
-            TuningStore.emptyMode(this),
-            listOf("placeholder" to "Text", "logo" to "Logo", "hidden" to "Hide")
+            "When nothing is active the status bar pill shows the placeholder label below. Clear " +
+                "that text to keep the pill away until an activity starts."
         )
 
         listenerStatus = StatusRow(this).apply { title = "Notification access" }
@@ -613,7 +655,10 @@ class SettingsActivity : AppCompatActivity() {
             }
 
     private fun labelCard() {
-        val body = card("Placeholder label", "Temporary text until real items replace it")
+        val body = card(
+            "Placeholder label",
+            "Shown when nothing is active. Clear it to hide the idle pill."
+        )
         val input = TextInputLayout(this).apply {
             hint = "Text shown in the pill"
             boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
@@ -912,12 +957,16 @@ class SettingsActivity : AppCompatActivity() {
     // ---------------------------------------------------------------- actions
 
     private fun refreshStates() {
-        // Ask the platform, not a static: the bridge field is cleared by a service that is being
-        // torn down, which made this card say "Stopped" while the overlay was drawing fine.
-        val a11y = NowBarBridge.service != null || a11yServiceEnabled()
-        val watcher = RootKeyguardWatcher.isRunning
+        // Everything here is read from something that actually exists right now: the master switch,
+        // the service object in this same process, and how many of its windows are attached. The
+        // old version OR-ed in "the service is listed as enabled", so it said Running with the
+        // master switch off, and said Stopped while the pill was drawing.
+        val master = TuningStore.isOn(this, TuningStore.MASTER)
+        val service = NowBarBridge.service
+        val windows = service?.windowsUp() ?: 0
+        val enabled = a11yServiceEnabled()
         val overlay = OverlayService.running
-        val live = a11y
+        val live = master && (service != null && windows > 0 || overlay)
 
         heroDot.background = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -925,43 +974,98 @@ class SettingsActivity : AppCompatActivity() {
         }
         heroTitle.text = if (live) "Running" else "Stopped"
         heroSubtitle.text = when {
-            live -> "Pill is drawn by the accessibility overlay"
-            overlay -> "Pill is drawn by the fallback overlay (apps only)"
-            else -> "Enable the accessibility service below to start the pill"
+            !master -> "Pill disabled by the master switch"
+            service == null && enabled -> "Accessibility service enabled, not connected yet"
+            service == null && overlay -> "Drawn by the fallback overlay (apps only)"
+            service == null -> "Accessibility service is off"
+            windows == 0 -> "Connected - nothing on screen (idle pill is hidden)"
+            windows == 1 -> "Drawing one surface"
+            else -> "Drawing $windows surfaces"
         }
 
-        a11yStatus.state = if (a11y) "running" else "off"
-        a11yStatus.on = a11y
-        watcherStatus.state = if (watcher) "streaming (root)" else "not running"
-        watcherStatus.on = watcher
+        a11yStatus.on = service != null
+        a11yStatus.state = when {
+            service != null -> "connected"
+            enabled -> "enabled, not connected"
+            else -> "off"
+        }
+        val watcherWanted = TuningStore.isOn(this, TuningStore.ROOT_WATCHER)
+        watcherStatus.on = watcherWanted && RootKeyguardWatcher.isStreaming
+        watcherStatus.state = when {
+            !watcherWanted -> "off (switch)"
+            RootKeyguardWatcher.isStreaming -> "streaming (root)"
+            RootKeyguardWatcher.isRunning -> "reconnecting"
+            else -> "not running"
+        }
         overlayStatus.state = if (overlay) "running" else "off"
         overlayStatus.on = overlay
         overlaySwitch.isChecked = overlay
-        masterSwitch.isChecked = TuningStore.isOn(this, TuningStore.MASTER)
+        masterSwitch.isChecked = master
 
         val listening = listenerGranted()
         listenerStatus.on = listening
         listenerStatus.state = if (listening) "granted" else "not granted"
 
-        // The hook lives inside SystemUI, so the only honest check is the SystemUI log. Root can
-        // read it; without the line, the module is not enabled for com.android.systemui yet.
-        if (::hookStatus.isInitialized) {
-            hookStatus.state = "checking…"
-            Thread {
-                val line = RootShell.run("logcat -d -s NowBar -t 400 | grep 'hook:' | tail -1")
-                val attached = line?.contains("attached") == true
-                runOnUiThread {
-                    hookStatus.on = attached
-                    hookStatus.state = when {
-                        attached -> "loaded"
-                        line.isNullOrBlank() -> "not loaded"
-                        else -> "off (kill switch)"
-                    }
-                }
-            }.start()
-        }
-
+        probeHook()
         refreshPreviews()
+    }
+
+    /**
+     * The hook lives inside SystemUI, so the app asks it through the one channel it publishes to:
+     * a `Settings.Global` heartbeat, refreshed every 30 s. A logcat line is only the fallback for
+     * a SystemUI that has not been restarted since this build (it has no heartbeat yet) - and the
+     * log rotates, which is what made a working hook report "not loaded".
+     */
+    private fun probeHook() {
+        if (!::hookStatus.isInitialized) return
+        val now = SystemClock.elapsedRealtime()
+        if (hookProbeBusy || now - hookProbedAt < HOOK_PROBE_MS) return
+        hookProbedAt = now
+        hookProbeBusy = true
+        Thread {
+            var on = false
+            var state = "not loaded"
+            try {
+                val raw = RootShell.run(
+                    "test -f ${NowBarHook.KILL_SWITCH} && echo KILL; " +
+                        "settings get global ${NowBarHook.KEY_HOOK_BEAT}; " +
+                        "logcat -d -s NowBar | grep 'hook:' | grep -v 'root: logcat' | " +
+                        "grep -E 'attached|kill switch' | tail -1"
+                ).orEmpty()
+                val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                val kill = lines.any { it == "KILL" }
+                val beat = lines.firstOrNull { it.toLongOrNull() != null }?.toLongOrNull() ?: 0L
+                val logLine = lines.lastOrNull { it.contains("hook:") }
+                val age = SystemClock.elapsedRealtime() - beat
+                when {
+                    kill -> state = "off (kill switch)"
+                    beat > 0L && age in -60_000L..HOOK_STALE_MS -> {
+                        on = true
+                        state = "loaded"
+                    }
+                    beat > 0L -> state = "not loaded (last beat ${age / 1000}s ago)"
+                    logLine?.contains("attached") == true -> {
+                        // Running an older hook build: loaded, but no heartbeat to confirm it.
+                        on = true
+                        state = "loaded (no heartbeat - restart SystemUI)"
+                    }
+                    logLine?.contains("kill switch") == true -> state = "off (kill switch)"
+                    else -> state = "not loaded"
+                }
+            } catch (t: Throwable) {
+                Log.w("hook probe failed", t)
+                state = "unknown (root unavailable)"
+            }
+            val finalOn = on
+            val finalState = state
+            runOnUiThread {
+                hookProbeBusy = false
+                if (::hookStatus.isInitialized) {
+                    hookStatus.on = finalOn
+                    hookStatus.state = finalState
+                }
+            }
+        }.start()
     }
 
     private fun refreshPreviews() {

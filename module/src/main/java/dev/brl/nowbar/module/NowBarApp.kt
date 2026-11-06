@@ -15,5 +15,10 @@ class NowBarApp : Application() {
         } catch (t: Throwable) {
             Log.w("dynamic colours unavailable, falling back to the baseline theme", t)
         }
+        // Started from here so the check is armed whichever way the app comes up, including the
+        // launch after the system restored the accessibility service.
+        NowBarWatchdog.schedule(this)
+        // The loop outlives this process, so a crash cannot leave the pill switched off.
+        RootKeeper.startAsync()
     }
 }

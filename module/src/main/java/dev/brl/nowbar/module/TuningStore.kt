@@ -46,10 +46,69 @@ object TuningStore {
     const val SCROLL_TEXT = "scrollText"
 
     /**
+     * How much the module writes to the log. 0 = warnings only, 1 = state changes (default),
+     * 2 = everything including every notification read. Read by [Log.sync].
+     */
+    const val DEBUG_LEVEL = "debugLevel"
+
+    fun debugLevel(context: Context): Int = try {
+        prefs(context).getInt(DEBUG_LEVEL, 1).coerceIn(0, 2)
+    } catch (t: Throwable) {
+        1
+    }
+
+    /**
      * The always-on display is a still, colourless screen: the pill fades to greyscale with it and
      * fades back to colour on wake. Off keeps it in colour on the AOD.
      */
     const val AOD_GRAY = "aodGray"
+
+    /**
+     * The AOD look: instead of a filled card, a thin outline with the text inside and the progress
+     * as a marching checkerboard across the bar. Off keeps the normal card on the AOD.
+     */
+    const val AOD_LINE_STYLE = "aodLineStyle"
+
+    /**
+     * Where the status pill sits while the shade / Quick Settings is open: -1 on either means "do
+     * not move". Zero is a real position, so it cannot mean "unset" here.
+     */
+    const val SB_SHADE_LEFT = "sbShadeLeftDp"
+    const val SB_SHADE_TOP = "sbShadeTopDp"
+    const val DEFAULT_SB_SHADE_LEFT_DP = -1
+    const val DEFAULT_SB_SHADE_TOP_DP = -1
+
+    /**
+     * How wide the pill is while the shade / Quick Settings is open. 0 means "fit the line", which
+     * is what it did before there was a setting: the pill grows up to half the screen.
+     */
+    const val SB_SHADE_WIDTH = "sbShadeWidthDp"
+    const val DEFAULT_SB_SHADE_WIDTH_DP = 0
+
+    /**
+     * AOD dot spacing in dp: how tightly packed the lattice is.
+     */
+    const val AOD_DOT_CELL = "aodDotCellDp"
+    const val DEFAULT_AOD_DOT_CELL_DP = 8
+
+    fun aodDotCellDp(context: Context): Int = try {
+        prefs(context).getInt(AOD_DOT_CELL, DEFAULT_AOD_DOT_CELL_DP).coerceIn(3, 24)
+    } catch (t: Throwable) {
+        DEFAULT_AOD_DOT_CELL_DP
+    }
+
+    /**
+     * AOD dot diameter in dp: how big each dot is, independent of the spacing. Never larger than the
+     * spacing, so at the top of the range the dots just touch instead of merging into a solid bar.
+     */
+    const val AOD_DOT_SIZE = "aodDotSizeDp"
+    const val DEFAULT_AOD_DOT_SIZE_DP = 5
+
+    fun aodDotSizeDp(context: Context): Int = try {
+        prefs(context).getInt(AOD_DOT_SIZE, DEFAULT_AOD_DOT_SIZE_DP).coerceIn(1, 16)
+    } catch (t: Throwable) {
+        DEFAULT_AOD_DOT_SIZE_DP
+    }
 
     /**
      * What an idle status bar pill says: the label, as typed. A blank label means there is nothing
@@ -141,6 +200,10 @@ object TuningStore {
     const val DEFAULT_SB_RADIUS_DP = 19
     const val DEFAULT_SB_LEFT_DP = 75
     const val DEFAULT_SB_TOP_DP = -1
+
+    /** Landscape overrides for the status bar pill. -1 = use the portrait value. */
+    const val DEFAULT_SB_LANDSCAPE_LEFT_DP = -1
+    const val DEFAULT_SB_LANDSCAPE_TOP_DP = -1
 
     // Expanded popup (third surface), opened by tapping the status bar pill. It carries the
     // detail and controls; the status bar pill itself stays text + image only.

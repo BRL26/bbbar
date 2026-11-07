@@ -22,6 +22,18 @@ object Tuning {
         val radiusDp: Int = TuningStore.DEFAULT_SB_RADIUS_DP,
         val leftDp: Int = TuningStore.DEFAULT_SB_LEFT_DP,
         val topDp: Int = TuningStore.DEFAULT_SB_TOP_DP,
+        /** Landscape overrides; -1 means "use the portrait value above". */
+        val leftLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP,
+        val topLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
+        /**
+         * Where to sit while the shade or Quick Settings is open; -1 means "stay where you are".
+         * That screen has its own header, so the strip the pill normally shares with the clock is
+         * laid out differently.
+         */
+        val shadeLeftDp: Int = TuningStore.DEFAULT_SB_SHADE_LEFT_DP,
+        val shadeTopDp: Int = TuningStore.DEFAULT_SB_SHADE_TOP_DP,
+        /** Fixed width in the shade; 0 means "fit the line", as before the setting existed. */
+        val shadeWidthDp: Int = TuningStore.DEFAULT_SB_SHADE_WIDTH_DP,
         val label: String = TuningStore.DEFAULT_LABEL
     )
 
@@ -63,6 +75,17 @@ object Tuning {
             radiusDp = p.getInt("sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP),
             leftDp = p.getInt("sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP),
             topDp = p.getInt("sbTopDp", TuningStore.DEFAULT_SB_TOP_DP),
+            leftLandscapeDp = p.getInt(
+                "sbLandscapeLeftDp",
+                TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP
+            ),
+            topLandscapeDp = p.getInt(
+                "sbLandscapeTopDp",
+                TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP
+            ),
+            shadeLeftDp = p.getInt("sbShadeLeftDp", TuningStore.DEFAULT_SB_SHADE_LEFT_DP),
+            shadeTopDp = p.getInt("sbShadeTopDp", TuningStore.DEFAULT_SB_SHADE_TOP_DP),
+            shadeWidthDp = p.getInt("sbShadeWidthDp", TuningStore.DEFAULT_SB_SHADE_WIDTH_DP),
             label = p.getString("label", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
         )
     }

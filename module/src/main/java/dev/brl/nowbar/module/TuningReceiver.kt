@@ -18,6 +18,15 @@ class TuningReceiver : BroadcastReceiver() {
     companion object {
         /** Sent by the settings screen's "Apply settings" button. */
         const val ACTION_RELOAD = "dev.brl.nowbar.module.RELOAD"
+
+        /**
+         * One SystemUI restart, through root. The hook only reloads with SystemUI, so a build that
+         * changed it needs exactly this after installing - and nothing else needs restarting.
+         *
+         *   adb shell am broadcast -a dev.brl.nowbar.module.RESTART_SUI \
+         *     -n dev.brl.nowbar.module/.TuningReceiver
+         */
+        const val ACTION_RESTART_SUI = "dev.brl.nowbar.module.RESTART_SUI"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -25,6 +34,19 @@ class TuningReceiver : BroadcastReceiver() {
             if (intent.action == ACTION_RELOAD) {
                 NowBarBridge.reload()
                 Log.i("TuningReceiver: reload requested")
+                return
+            }
+            // A card that exists only to be looked at: media | timer | live | none.
+            val fake = intent.getStringExtra("fake")
+            if (fake != null) {
+                NowBarState.applyFake(fake)
+                return
+            }
+            if (intent.action == ACTION_RESTART_SUI) {
+                Thread {
+                    val out = RootShell.run("killall com.android.systemui")
+                    Log.i("TuningReceiver: SystemUI restart -> ${out ?: "no root"}")
+                }.start()
                 return
             }
             // Log every stored tuning value so the numbers can be baked in.
@@ -83,14 +105,18 @@ class TuningReceiver : BroadcastReceiver() {
         TuningStore.FEATURE_TIMERS,
         TuningStore.FEATURE_ALARM,
         TuningStore.FEATURE_LIVE,
-        TuningStore.AOD_GRAY
+        TuningStore.AOD_GRAY,
+        TuningStore.AOD_LINE_STYLE
     )
 
     private fun intents(intent: Intent) =
         listOf(
             "widthDp", "heightDp", "textDp", "radiusDp", "bottomDp",
             "sbWidthDp", "sbHeightDp", "sbTextDp", "sbRadiusDp", "sbLeftDp", "sbTopDp",
+            "sbLandscapeLeftDp", "sbLandscapeTopDp", "sbShadeLeftDp", "sbShadeTopDp",
+            "sbShadeWidthDp",
+            "aodDotCellDp", "aodDotSizeDp",
             "popupWidthDp", "popupHeightDp", "popupTextDp", "popupRadiusDp",
-            "popupLeftDp", "popupTopDp"
+            "popupLeftDp", "popupTopDp", "popupLandscapeTopDp"
         )
 }

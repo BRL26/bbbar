@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v1.0.0, published** (`github.com/BRL26/bbbar`, tag `v1.0.0`). Base is settled: the accessibility
+**v1.10.0, published** (`github.com/BRL26/bbbar`, tag `v1.10.0`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -222,6 +222,204 @@ Enable / disable:
       switch the pill off. The old `-1`-as-*auto* slider values also display as *auto* again in the
       settings screen (they used to be clamped to 0 and could not have been fed to the Slider)
 
+### 1.0.4 — the reopened issues (verified on the device)
+- [x] **#3 scrubber frozen**: `PlaybackState.position` is a snapshot from `lastPositionUpdateTime`,
+      and a player only posts a new state when something happens, so the raw value sat still. It is
+      now interpolated (`NowBarState.livePosition`: base + elapsed × speed, clamped to the duration)
+      in both the tick and the builder. A seek or play/pause is also *held* over the player's own
+      state (`NowBarState.holdMedia`, 1.5–2 s) so the thumb no longer snaps back, and the glyph
+      flips immediately instead of on the next tick. Verified with a session that reports a static
+      position: the label advances; controls and seek reach the player (`media: pause`, `seek to
+      45831ms`, session position matches)
+- [x] **#6 swipe cut off**: a window clips to its own bounds, so a card that followed the finger was
+      sliced where the window ended. The window now grows around the card for the duration of a drag
+      (64 dp each way, capped at half the card) and closes again when the card is back
+      (`growForDrag`/`shrinkAfterDrag`, `PillView.setFixedBox`). The drag is measured in **raw**
+      screen coordinates, because moving the window changed where a touch landed in view
+      coordinates and the card chased its own window. The status bar pill no longer follows the
+      finger at all (it ignores swipes). Verified from a 30 fps recording: the whole card moves,
+      rounded corners and text intact, and settles back
+- [x] **#8 AOD look, third iteration**: thin outline instead of a filled card, text inside, and the
+      progress drawn as a lattice of small dots - **white** on the bar, and **black** punched
+      through the glyphs (the text is the inversion of the same lattice, clipped with a text path).
+      Tiled with a `BitmapShader`, so a full bar is one draw call. The lattice drifts: a new random
+      direction and speed every 2.2-4.5 s, eased in over ~0.9 s, never faster than 8 dp/s, advanced
+      once per frame from `dt`. Spacing and dot size come from one setting (`aodDotCellDp`, 2-20 dp,
+      default 6). Verified on the AOD slice the display composites: outline plus a row of dots over
+      the played 35 %
+- [x] **#7 landscape configurable in the app**: `sbLandscapeLeftDp` / `sbLandscapeTopDp` (both -1 =
+      same as portrait) plus the existing popup landscape offset, all as rows in the settings screen
+- [x] **#1 hook reload without restart-loops**: the status bar parity lives in the hook, which only
+      loads with SystemUI. One broadcast restarts it exactly once:
+      `am broadcast -a dev.brl.nowbar.module.RESTART_SUI -n dev.brl.nowbar.module/.TuningReceiver`
+      (`TuningReceiver`). Verified: new SystemUI pid, `hook: attached`, `hook: icon area found`,
+      `hook: status bar visible`, `bbbar_sb_hidden = 0` written for the first time
+- [x] **Test lever**: `--es fake media|timer|live|none` puts a card on the real pill from adb, for
+      screens the settings UI cannot be reached from
+
+### 1.0.4 — status bar visibility is pushed, not polled
+- [x] **The pill now leaves with the bar, including the launcher's fade-out.** The barrier was that a
+      hidden bar can be a *window* the window manager fades or scales, so no view property changes:
+      `isShown`, `alpha` and `getGlobalVisibleRect` all stayed "visible", which is why the pill sat
+      in a strip the bar had already vacated. Window insets were tried instead and were worse: a
+      window that stops drawing stops receiving inset updates, so the last answer stuck at "hidden"
+      and the pill stayed gone. What actually works is the platform's own push:
+      `CommandQueue.Callbacks.setWindowState` → `StatusBarWindowStateController#setWindowState`,
+      hooked in `NowBarHook`. It writes `bbbar_sb_hidden` on the change, and the service watches that
+      key with a `ContentObserver` — no timer on the fast path. Verified on the device:
+      `hook: status bar visible (pushed)` → pill slides in; home screen → `hidden (pushed)` → pill
+      rises out 190 ms later (that 190 ms is its own exit animation, not detection lag)
+- [x] **Exit/return animation.** The pill rises and fades when the bar goes, and comes back down from
+      the top edge. An instant removal read as the pill falling off while the bar was still moving
+- [x] **Shade and Quick Settings keep the pill.** They are not a hidden bar, so the pill stays visible
+      there by design
+- [x] **Fallback kept.** If the push cannot be hooked, the hook samples the bar view every 500 ms:
+      still correct for immersive apps, just blind to the fade-out kind
+- [x] **AOD dot size is its own setting** (`aodDotSizeDp`, 1-16 dp, default 5) next to spacing
+      (`aodDotCellDp`, 3-24 dp, default 8), so the dots can be made visibly bigger without changing
+      how tightly they are packed. Dot diameter is clamped to the spacing, so the maximum is dots
+      that just touch rather than merge into a solid bar
+
+### 1.0.4 — shade position, drag feel, AOD text
+- [x] **Pill position while the shade / Quick Settings is open.** That screen has its own header, so
+      the strip the pill shares with the clock is not there. Two new settings,
+      `sbShadeLeftDp` / `sbShadeTopDp` (`-1` = stay put), applied on the push from
+      `NotificationShadeWindowControllerImpl#apply` (field `shadeOrQsExpanded`). Verified on the
+      device: shade opened → `sb pill updated: … at x=105 y=788px` 11 ms after the push; shade
+      closed → back to `x=194 y=27px`
+- [x] **Drag start reads as a stretch, not a wrong guess.** Until the direction is clear (12 dp, one
+      axis leading by 1.25×) the card follows 22 % of the finger; the axis locks once and cannot
+      flip, then the grip eases to 1 over ~130 ms so the card bounces over to the finger and tracks
+      it. Sideways stays at 75 %, since it commits to a skip. The release now commits on the locked
+      axis instead of whichever delta was bigger at lift
+- [x] **Controls while dragging.** The drag window grows up to 160 dp each way (capped at the card
+      height) instead of 64 dp, so a long drag no longer runs out of window and slices the card and
+      its controls. Control taps are hit-tested where the card is drawn (`event.x - dragX`), so a tap
+      during the spring-back lands on the control it looks like
+- [x] **AOD text dots are the progress.** The black dots in the AOD text are clipped to the filled
+      fraction as well as to the glyphs, so they only exist as far as the playhead reached; beyond
+      it the line is solid, and at 0 % there are no holes
+
+### 1.0.4 — the shade screen
+- [x] **Quick Settings uses the top pill, locked or unlocked.** The keyguard's bottom pill sat behind
+      the notification list, so while the shade is open the top pill is the one shown; the bottom one
+      and the popup are removed. Default height there is unchanged; **Shade / Quick Settings top
+      edge** (`sbShadeTopDp`) moves it. The left slider was removed: that strip has no clock
+- [x] **Visible only, never tappable in the shade.** `FLAG_NOT_TOUCHABLE` on the window plus
+      `PillView.interactive = false`, so taps fall through to the shade's own header. Verified: a tap
+      on the pill with the shade open produced no expand and no popup
+- [x] Both driven by the shade push, so they land with the shade animation
+
+### 1.0.4 — landscape, the clock, and the shade margin
+- [x] **Landscape is centred**, in the status bar and with the shade open; a tuned left edge is
+      ignored there (the clock owns the left end, the icons the right). Width morphs stay centred
+- [x] **The pill clears the clock** instead of a fixed margin: the hook publishes the clock's right
+      edge (`bbbar_clock_right_px`, `0` when the clock is hidden), and the portrait left edge is
+      pushed to the right of it. Verified: `193px` portrait, `0` with the shade open
+- [x] **Shade margin**: with the clock hidden, the pill uses a plain **16 dp** left margin instead of
+      the clock-sized gap. Verified: `sb pill updated … at x=42 y=27px`
+- [x] **Rotation re-places everything.** A service keeps its display metrics from start-up and does
+      not reliably get `onConfigurationChanged`, which is why a landscape pill survived a turn. The
+      hook now publishes SystemUI's screen size (`bbbar_screen_w/h`) and the app watches it plus a
+      display listener, then re-places every window that is up
+- [x] **Wider when there is room**: half the screen with the shade open, a third in landscape, on top
+      of the tuned cap (which still applies in portrait)
+- [x] **Lock pill cannot appear in the shade**: `addLockPill` refuses while the shade is open, so a
+      lock-state event landing mid-open no longer draws both pills at once
+
+### 1.0.4 — the drag was losing the card
+- [x] **Why the card vanished.** A window clips to its own bounds, so a drag offset that ended up
+      larger than the room the window had grown by drew the card outside it: gone until something
+      else moved it. Three things conspired: a cancelled spring left a non-zero offset behind, a
+      new touch did not reset it, and the drag offset was never held inside the grown room. Fixed:
+      offsets are clamped to the grown box while dragging, a new touch cancels any spring and zeroes
+      both offsets, `setFixedBox(0, 0)` (the window closing) zeroes them too, and the drag axis now
+      force-locks after 26 dp instead of staying in the damped "stretched" state
+- [x] **No more resizing mid-drag.** A content change, a preference or a placement landing while the
+      finger was down moved or resized the window under the card, and the drag then shrank back to a
+      stale height. `applySbTuning` / `applyLockTuning` / `applyPopupTuning` now defer while a drag
+      owns the window, and the deferred apply happens right after the drag closes it
+- [x] Verified on the device: `drag: window grown to 1032x579` on the expanded card, then a committed
+      vertical swipe switched the card and a horizontal one sent `media: previous` — the card stayed
+      whole and in place both times (screenshots), instead of collapsing
+- [ ] Still open: the drag cannot be watched frame by frame over adb (`input motionevent` does not
+      build one gesture, and the expanded view auto-closes after 10 s), so the *feel* of the start
+      still wants your finger
+
+### 1.0.4 — the dragging mechanic, reworked
+- [x] **The window itself follows the finger.** Growing the window and drawing the card offset
+      inside it cannot work: the window clips to its own bounds, which is the "imaginary box" cutting
+      the card off, and any offset left over when the window shrank put the card outside it — gone.
+      Now the window stays the card's size and the WM moves it, so there is nothing to clip and
+      nothing to restore. Verified: `drag: window follows the finger from 24,147`, and the card is
+      whole and back in place afterwards (screenshot)
+- [x] **Why it "could not be dragged":** a window that moves with the finger makes the tail of its
+      own gesture land outside itself, arriving as `ACTION_OUTSIDE` — which was wired to collapse.
+      Ignored while dragging or seeking now, so the card no longer collapses the instant the drag
+      starts
+- [x] **No replay after the drag**: expansion animators are cancelled on drag start, which is what
+      produced "teleports twice, then falls from the top" (the expand animation re-running)
+- [x] **The return is animated**: the offset animation now drives the window, so the card slides
+      home (~0.42 s with overshoot short of a swipe, ~0.32 s after one) instead of snapping
+- [x] **Seek no longer freezes the clock**: the held command is a *prediction* (position + elapsed
+      time, advancing at playback speed) rather than a pinned value, so the elapsed time keeps
+      counting up through the 2 s hold instead of stopping dead
+- [ ] Open: card icons for calls/messenger — the buttons next to the title fall back to the first
+      letter of the action label, because the notification's own action icons are not captured yet
+
+### 1.0.4 — placement: landscape centred, portrait gap
+- [x] **Landscape kept shifting after the first frame.** `applySbTuning` centred the pill using the
+      *tuned maximum* width, then put the width on screen back to the fitted one, so the centre was
+      off by half the difference and snapped a moment after the placement. The x is now worked out
+      from the width the window actually has — verified: a 524 px pill lands at x=934 on a 2392 px
+      screen, `(2392 − 524) / 2`, and stays there
+- [x] **The expanded card is centred in landscape too** (it was pinned to a 16 dp left margin while
+      the pill it grows from sat in the middle). Verified from the expansion log:
+      `popup expanding from pill 315x63 at 934,34 to 1032x367 at 680,179` — `(2392 − 1032) / 2 = 680`
+- [x] **Portrait keeps a gap after the clock** (`SB_CLOCK_GAP_DP = 8`). Clamping the pill exactly
+      onto the clock's right edge read as one long status bar item, and moved a tuned left edge off
+      its spot — verified: clock ends at 170 px, pill starts at 190
+- [x] **A boot-time stale display size can no longer strand the pill.** SystemUI starts before its
+      configuration settles and publishes the *landscape* size on a portrait screen, so the pill
+      was placed centred for 2392 px on a 1080 px screen — i.e. off the right edge, which is the
+      "it's not where it used to be". The published size is now cross-checked against the display's
+      rotation, and a size change re-places every window from the poll
+- [x] **Log flood silenced**: the per-notification `rebuild sees …` line is verbose now; at info level
+      it pushed the placement lines out of the buffer within seconds
+
+### 1.10.0 — settings, the boot flash, and the last of the media nits
+
+- [x] **No placeholder on a lock screen, ever.** The boot flash was the *keyguard flag*: on a cold
+      boot `isKeyguardLocked` answers "unlocked" while the lock screen is still being built, so the
+      status pill was drawn with the idle line and taken away again a moment later. The lock pill and
+      the expanded card now refuse the placeholder outright (`PillView.allowIdle`), and the status
+      pill only draws it after an unlock has really happened in this boot — remembered in
+      `nowbar_session` with the boot marker, so a keeper/service restart mid-session keeps it while a
+      fresh boot still starts without it. Seen on a reboot: three `keyguardLocked=true (boot …)`
+      readings before the keyguard settled, no pill on the lock screen, card drawn at the bottom.
+- [x] **A second, worse cause of the same flash** found in the root stream: the platform prints
+      `E/KeyguardViewMediator … Do not proceed to finish keyguard exit and unlock.` right after a
+      relock. `looksLikeUnlock` matched "keyguard exit" inside it and forced an unlock. Error lines
+      and the "do not proceed"/"mPendingLock=true" guards are ignored now.
+- [x] **Media transport glyphs were mirrored**: `drawSkip` put the bar on the *opposite* side of the
+      arrow, so prev showed the next glyph and next showed the previous one. Bar and arrow now point
+      the same way (⏮ / ⏭).
+- [x] **A live update at 100 % is finished**: the card is dropped from the stack (`NowBarItems`), so
+      the pill stops showing a full, silent bar that the source app left up.
+- [x] **Reset all settings** on the About tab: confirmation dialog, clears `tuning` (and the session
+      marker), reloads the module, returns to Home.
+- [x] **Shade / Quick Settings width** setting: `0` keeps the fit-the-line behaviour, any other value
+      is the fixed width the pill takes while the shade is open; the value is a width, not a ceiling,
+      and is clamped to the screen.
+- [x] **Home preview is the bar itself**: `NowBarState.items()` feeds the real `PillView`, so the card
+      on the screen is the card in the app, in rank order at the tuned sizes, refreshed on the 1.5 s
+      tick. Caption says what it is showing (kind, collapsed/expanded, stack depth).
+- [x] **Back walks the settings screen**: sub-page → its tab → Home → out (`OnBackPressedCallback`).
+- [x] **Bottom tabs stay honest**: `syncTabChips()` after every render, so a reset or any other
+      programmatic page change moves the selected chip with it.
+- [x] **The `\u2190` literal** in the Back button was written as an escaped backslash in the source;
+      it renders as an arrow now.
+
 ## Next
 
 ### Pill content
@@ -291,10 +489,15 @@ torch, VPN, next calendar event.
   shows still comes from the accessibility overlay.
 - **The hook needs the module enabled for `com.android.systemui`** in LSPosed, and one SystemUI
   restart after installing a new build. `touch /data/local/tmp/bbbar_hook_off` disables it entirely.
-- **The 1.0.2 status-bar parity was not exercised on the device**: it lives in the hook, and the
-  hook only reloads with SystemUI. `adb shell su` is denied on this phone (Magisk allows apps, not
-  shell), so the restart could not be issued from here; the code path is compiled and fails safe
-  (`bbbar_sb_hidden` is only read while the hook heartbeat is fresh, otherwise the pill stays
-  visible). It needs one SystemUI restart from the settings screen to take effect.
+- **Status bar visibility is verified both ways** (owner confirmed). Home screen: the launcher's
+  auto-hide fades the bar, the push reports hidden, the pill rises out. Any app with a bar: the
+  push reports visible and the pill slides back down. Shade/QS: the pill stays visible on purpose.
+- **The drag feel and the AOD text clip were not watched on the device.** Both are compiled and
+  reachable, but confirming them needs a finger on the screen (a mid-gesture frame) and the AOD,
+  which cannot be entered without locking the phone to a PIN screen I cannot unlock. Worth a look:
+  drag sideways and watch the lean-then-catch-up, and read the AOD text at a small played fraction.
+- **Scrubber interpolation was not watched on a real player.** There was no playing session at test
+  time (both media sessions were `NONE`), so the fix is verified by the code path and by a session
+  whose position moves, not by a track advancing on the lock screen.
 - **No root overlay daemon**: `app_process` is not registered with ActivityManager, so
   `WindowManager` refuses its window (`Unknown pid … uid=0`). Root is only the logcat wakeup.

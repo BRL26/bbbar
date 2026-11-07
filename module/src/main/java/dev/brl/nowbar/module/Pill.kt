@@ -6,7 +6,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.BitmapShader
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
@@ -51,6 +53,37 @@ class PillView(context: Context) : View(context) {
 
         /** Height of the expanded media seek row: the track plus the elapsed time beside it. */
         private const val SEEK_ROW_DP = 14f
+
+        /** One full march of the AOD dot lattice. */
+        private const val DOT_PERIOD_MS = 2_600L
+
+
+        /** Drift bounds: a new random direction every [DRIFT_TURN_MIN_MS]..[DRIFT_TURN_MAX_MS]. */
+        private const val DRIFT_TURN_MIN_MS = 2_200L
+        private const val DRIFT_TURN_MAX_MS = 4_500L
+
+        /** How quickly the dots ease from one direction into the next. */
+        private const val DRIFT_EASE_MS = 900f
+
+        /**
+         * How much of the finger the card takes before the direction is clear. Low on purpose: it
+         * is the "being stretched from one edge" part, and it is what stops a swipe from reading as
+         * a jump in the wrong direction.
+         */
+        private const val DRAG_GRIP_START = 0.4f
+
+        /** Time constant for the card catching up to the finger once the direction is guessed. */
+        private const val DRAG_CATCHUP_MS = 90f
+
+        /** However unclear the direction, the guess is made once the finger has gone this far. */
+        private const val DRAG_FORCE_LOCK_DP = 26f
+
+        /** How far the card gives while the direction is still unknown. */
+        private const val DRAG_GIVE_DP = 16f
+
+        /** How far the finger has to go, and by how much it must dominate, to lock an axis. */
+        private const val DRAG_LOCK_DP = 12f
+        private const val DRAG_LOCK_RATIO = 1.25f
     }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -105,6 +138,14 @@ class PillView(context: Context) : View(context) {
     private var loggedFirstDraw = false
     private var downX = 0f
     private var downY = 0f
+
+    /**
+     * The same touch in screen coordinates. The window is moved and grown for the duration of a
+     * drag, which changes where a screen point lands in view coordinates - measuring the drag in
+     * view coordinates made the card chase its own window. Raw coordinates do not move.
+     */
+    private var downRawX = 0f
+    private var downRawY = 0f
     private var blurSource: Bitmap? = null
     private var blurResult: Bitmap? = null
     private var blurStrengthCached = -1
@@ -125,13 +166,83 @@ class PillView(context: Context) : View(context) {
     private var dragX = 0f
     private var dragY = 0f
     private var dragging = false
+
+    /**
+     * Which way this drag is going: 0 until it is clear, 1 sideways, 2 up/down. Decided once, so a
+     * sideways swipe cannot flip to up/down halfway through - that flip is what made the card
+     * wander vertically and then jump sideways.
+     */
+    private var dragAxis = 0
+
+    /**
+     * How much of the finger the card is taking, 0..1. It starts low: the card leans towards the
+     * pull like something being stretched from one edge, then lets go and catches up to the finger.
+     * That catch-up is the little bounce into place, and from then on the card tracks exactly.
+     */
+    private var dragGrip = 1f
+
+    /** Timestamp of the last move event, for a frame-rate independent catch-up. */
+    private var lastMoveAt = 0L
+
+    /**
+     * When true the surface's *window* is what moves, not its drawing: the offset is handed to the
+     * service as a delta and the window manager moves the whole thing. A window that stays exactly
+     * its own size has nothing to clip, so the card cannot be sliced at an invisible edge.
+     */
+    var dragMovesWindow = false
+
+    /** Receives (dx, dy) increments while the window follows the finger. */
+    var onDragMove: ((Int, Int) -> Unit)? = null
+
+    /** Offset already handed to the window, so only the change is sent. */
+    private var sentX = 0
+    private var sentY = 0
     private var dragAnimator: ValueAnimator? = null
+    private var dragWindowOpen = false
+
+    /**
+     * Room the window has been grown by so the card can move without being cut off at the edge,
+     * and the card height to draw at while it is. A window cannot draw outside its own bounds, so
+     * a drag that followed the finger used to be sliced where the window ended.
+     */
+    private var topPadPx = 0
+    private var fixedCardH = 0
 
     /** The expanded media seek slider: its touch band, and the position being dragged to. */
     private val seekTouch = RectF()
     private var seekVisible = false
     private var seeking = false
     private var seekFraction = -1f
+
+    /**
+     * The AOD look: no filled card, a thin outline, the text inside it, and the progress drawn as a
+     * marching checkerboard across the whole bar.
+     */
+    private var lineStyle = false
+    private var checkerActive = false
+    /** Dot tiles, keyed by colour and cell size: the bar's fill and the text use the same lattice. */
+    private val dotShaders = HashMap<Long, BitmapShader>()
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val aodGlyphPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * The AOD lattice drifts. It picks a new direction and speed every few seconds and eases into
+     * it over a moment, so the dots wander instead of marching the same diagonal forever, without
+     * ever changing direction in one frame.
+     */
+    private val driftRandom = java.util.Random()
+    private var driftX = 0f
+    private var driftY = 0f
+    private var driftVelX = 0f
+    private var driftVelY = 0f
+    private var driftTargetX = 0f
+    private var driftTargetY = 0f
+    private var driftNextTurnAt = 0L
+    private var driftLastAt = 0L
+    private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = dp(1.4f)
+    }
 
     /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
     private var gray = 0f
@@ -156,6 +267,17 @@ class PillView(context: Context) : View(context) {
 
     /** Fires for a tap that was not a swipe or a control press. */
     var onTap: (() -> Unit)? = null
+
+    /**
+     * A drag started, and the window should be grown around the card for the duration; fired again
+     * with the drag over once the card is back in its resting place. The owner moves the window, the
+     * view only asks.
+     */
+    var onDragStart: (() -> Unit)? = null
+    var onDragEnd: (() -> Unit)? = null
+
+    /** Surfaces that ignore swipes (the status bar pill) must not follow the finger at all. */
+    var dragEnabled = true
 
     /** `dx`/`dy` are -1, 0 or 1; the service decides what the gesture means per surface. */
     var onSwipe: ((Int, Int) -> Unit)? = null
@@ -247,6 +369,17 @@ class PillView(context: Context) : View(context) {
         }
     }
 
+    /** Switches the AOD look on or off. The service sets it with the display, not with the theme. */
+    fun setLineStyle(on: Boolean) {
+        try {
+            if (lineStyle == on) return
+            lineStyle = on
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setLineStyle threw", t)
+        }
+    }
+
     /**
      * Fades the whole card to greyscale. The always-on display asks for 1; waking fades it back
      * quickly, so the pill never pops from grey to colour in one frame.
@@ -332,6 +465,30 @@ class PillView(context: Context) : View(context) {
      * Front item first. [peekPx] is how far each card behind the front one shows; the window has
      * already been grown by `peekPx * (n - 1)` to make room.
      */
+    /**
+     * Draws the card at [cardHeightPx], inset [topPadPx] from the top of a window that has been
+     * grown for a drag. `(0, 0)` returns to following the window.
+     */
+    fun setFixedBox(cardHeightPx: Int, topPadPx: Int) {
+        try {
+            fixedCardH = cardHeightPx.coerceAtLeast(0)
+            this.topPadPx = topPadPx.coerceAtLeast(0)
+            // The window is closing up around the card again. Any leftover drag offset would draw
+            // the card outside those bounds - which is exactly how it used to vanish, because a
+            // window clips to itself and a cancelled spring left the offset behind.
+            if (this.topPadPx == 0) {
+                dragAnimator?.cancel()
+                dragAnimator = null
+                dragX = 0f
+                dragY = 0f
+                dragAxis = 0
+            }
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setFixedBox threw", t)
+        }
+    }
+
     /** Freezes the drawn content at [px] height (bottom anchored); 0 follows the window. */
     fun setContentHeight(px: Int) {
         try {
@@ -371,6 +528,14 @@ class PillView(context: Context) : View(context) {
         try {
             val previous = items.firstOrNull()
             val next = newItems.firstOrNull()
+            // A front-card change is a card change whoever caused it: a swipe already slides
+            // (animateSwap), so this covers the ones that arrive from content - the track ending,
+            // the timer finishing, the next card taking the front.
+            if (slideAnimator?.isRunning != true && previous != null && next != null &&
+                previous.id != next.id
+            ) {
+                animateSwap(1)
+            }
             // Only a real content change restarts the line. The notification store rebuilds every
             // item about once a second while a player is running, and each rebuild hands over a
             // fresh Bitmap for the same cover, so identity (`!==`) used to read that as "next
@@ -414,6 +579,7 @@ class PillView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         marqueeActive = false
+        checkerActive = false
         seekVisible = false
         seekTouch.setEmpty()
         // Greyscale is a layer filter over the finished card, so the artwork, the text and the
@@ -431,12 +597,24 @@ class PillView(context: Context) : View(context) {
         }
         canvas.save()
         try {
-            val drawH = if (contentHeightPx > 0) contentHeightPx.toFloat() else height.toFloat()
+            // The AOD lattice moves: step it once per frame and keep the frame clock going.
+            if (lineStyle) {
+                checkerActive = true
+                advanceDrift(aodDotCell())
+            }
+            val drawH = when {
+                fixedCardH > 0 -> fixedCardH.toFloat()
+                contentHeightPx > 0 -> contentHeightPx.toFloat()
+                else -> height.toFloat()
+            }
             // Bottom anchored while collapsing: the shrinking window crops the card from the top
             // rather than re-laying out its contents, so nothing is squished.
             if (contentHeightPx > 0) canvas.translate(0f, (height - contentHeightPx).toFloat())
+            // Everything below is in card coordinates, so one translate puts the card where the
+            // drag has taken it inside the grown window.
+            if (topPadPx > 0) canvas.translate(0f, topPadPx.toFloat())
             if (slidePx != 0f) canvas.translate(0f, slidePx)
-            if (dragX != 0f || dragY != 0f) canvas.translate(dragX, dragY)
+            if (!dragMovesWindow && (dragX != 0f || dragY != 0f)) canvas.translate(dragX, dragY)
 
             val count = items.size.coerceAtLeast(1)
             val stacked = minOf(((count - 1) * peekPx).toFloat(), drawH * 0.45f)
@@ -491,8 +669,9 @@ class PillView(context: Context) : View(context) {
         } finally {
             canvas.restore()
             if (layer >= 0) canvas.restoreToCount(layer)
-            // Keep the frame clock running only while a line is actually scrolling.
-            if (marqueeActive) postInvalidateOnAnimation()
+            // Keep the frame clock running only while something is actually moving: a scrolling
+            // line, or the AOD's checkerboard marching across the bar.
+            if (marqueeActive || checkerActive) postInvalidateOnAnimation()
         }
     }
 
@@ -504,16 +683,26 @@ class PillView(context: Context) : View(context) {
 
         // The idle line is the label itself; a blank label means the owner has nothing to say,
         // so the card is not drawn at all rather than left as an empty shape.
-        if (item == null && TuningStore.idleLabel(context).isEmpty()) return
+        if (item == null && (!allowIdle || TuningStore.idleLabel(context).isEmpty())) return
 
         clipToCard(canvas, area, r)
-        canvas.drawColor(fill.color)
         val art = item?.art
-        if (item != null && item.kind == ItemKind.MEDIA && art != null) {
-            drawArtBackground(canvas, area, art)
+        if (lineStyle) {
+            // AOD look: no card behind the content, the bar itself is the progress.
+            drawAodFill(canvas, area, item?.progress ?: -1f)
+        } else {
+            canvas.drawColor(fill.color)
+            if (item != null && item.kind == ItemKind.MEDIA && art != null) {
+                drawArtBackground(canvas, area, art)
+            }
         }
         canvas.restore()
-        canvas.drawRoundRect(area, r, r, stroke)
+        if (lineStyle) {
+            outline.color = titlePaint.color
+            canvas.drawRoundRect(area, r, r, outline)
+        } else {
+            canvas.drawRoundRect(area, r, r, stroke)
+        }
 
         clipToCard(canvas, area, r)
 
@@ -589,7 +778,14 @@ class PillView(context: Context) : View(context) {
             val cy = contentBottom / 2f
             keys.forEachIndexed { i, key ->
                 val x = left + i * (size + gap)
-                val rect = RectF(x, cy - size / 2f, x + size, cy + size / 2f)
+                // Hit areas live in view coordinates, so a card inset by a grown window carries
+                // that inset too.
+                val rect = RectF(
+                    x,
+                    cy - size / 2f + topPadPx,
+                    x + size,
+                    cy + size / 2f + topPadPx
+                )
                 controlRects.add(rect)
                 controlKeys.add(key)
                 when (key) {
@@ -616,8 +812,8 @@ class PillView(context: Context) : View(context) {
         val showSubtitle = expanded && subtitle.isNotBlank() && h >= dp(40f) && available >= dp(40f)
         // A media card that knows its length gets a scrubber under the name, with the elapsed time
         // beside it, instead of the thin progress strip along the bottom edge.
-        val showSeek = expanded && item?.kind == ItemKind.MEDIA && item.durationMs > 0L &&
-            h >= dp(46f) && available >= dp(70f)
+        val showSeek = expanded && !lineStyle && item?.kind == ItemKind.MEDIA &&
+            item.durationMs > 0L && h >= dp(46f) && available >= dp(70f)
 
         val gap = dp(1f)
         val seekRow = if (showSeek) dp(SEEK_ROW_DP) else 0f
@@ -625,18 +821,39 @@ class PillView(context: Context) : View(context) {
             (if (showSubtitle) gap + subtitlePaint.textSize else 0f) + seekRow
         val top = ((contentBottom - block) / 2f).coerceAtLeast(dp(2f))
         val titleBaseline = top - titlePaint.ascent()
-        paintEllipsized(canvas, title, titlePaint, textLeft, titleBaseline, available)
+        // The dots punched through the AOD text are the *same* dots as the bar's progress, so they
+        // only exist as far as the playhead has reached. Anything beyond it stays solid text.
+        val aodFilledRight = w * (item?.progress ?: 0f).coerceIn(0f, 1f)
+        if (lineStyle) {
+            // AOD: the glyphs are the inversion of the dot lattice, so they read as part of the bar.
+            paintAodText(canvas, title, titlePaint, textLeft, titleBaseline, available, aodFilledRight)
+        } else {
+            paintEllipsized(canvas, title, titlePaint, textLeft, titleBaseline, available)
+        }
         var lineBottom = titleBaseline + titlePaint.descent()
         if (showSubtitle) {
             val subBaseline = lineBottom + gap + subtitlePaint.textSize
-            paintEllipsized(canvas, subtitle, subtitlePaint, textLeft, subBaseline, available)
+            if (lineStyle) {
+                paintAodText(
+                    canvas,
+                    subtitle,
+                    subtitlePaint,
+                    textLeft,
+                    subBaseline,
+                    available,
+                    aodFilledRight
+                )
+            } else {
+                paintEllipsized(canvas, subtitle, subtitlePaint, textLeft, subBaseline, available)
+            }
             lineBottom = subBaseline + subtitlePaint.descent()
         }
         if (showSeek && item != null) {
             drawSeekRow(canvas, item, textLeft, lineBottom + dp(1f), available)
         }
 
-        if (showBar && !seekVisible && item != null) {
+        // The line style draws the progress as the bar's own checkerboard instead.
+        if (showBar && !seekVisible && !lineStyle && item != null) {
             val insetX = (r * 0.55f).coerceAtLeast(dp(14f))
             val trackW = w - insetX * 2f
             if (barTop > dp(2f) && trackW > barH * 2f) {
@@ -652,6 +869,138 @@ class PillView(context: Context) : View(context) {
         }
         canvas.restore()
     }
+
+    /**
+     * The AOD bar's fill: little dots on a diagonal lattice covering the played fraction, marching
+     * slowly so a still screen still reads as running. One tiled shader, so a full-width bar is one
+     * draw call rather than a circle per dot.
+     */
+    private fun drawAodFill(canvas: Canvas, area: RectF, fraction: Float) {
+        try {
+            if (fraction < 0f) return
+            checkerActive = true
+            val filled = area.width() * fraction.coerceIn(0f, 1f)
+            if (filled <= dp(2f)) return
+            val cell = aodDotCell()
+            val shader = dotShader(cell)
+            shader.setLocalMatrix(dotPhaseMatrix())
+            dotPaint.shader = shader
+            canvas.drawRect(area.left, area.top, area.left + filled, area.bottom, dotPaint)
+            dotPaint.shader = null
+        } catch (t: Throwable) {
+            Log.w("PillView AOD fill failed", t)
+        }
+    }
+
+    /**
+     * AOD text: solid glyphs in the text colour with the same dot lattice punched through them in
+     * black, so the line is the inverse of the bar it sits in.
+     */
+    private fun paintAodText(
+        canvas: Canvas,
+        text: String,
+        paint: TextPaint,
+        x: Float,
+        baseline: Float,
+        available: Float,
+        filledRight: Float
+    ) {
+        if (available <= 0f || text.isEmpty()) return
+        try {
+            val shown = if (paint.measureText(text) <= available + 0.5f) {
+                text
+            } else {
+                TextUtils.ellipsize(text, paint, available, TextUtils.TruncateAt.END).toString()
+            }
+            if (shown.isEmpty()) return
+            val path = Path()
+            paint.getTextPath(shown, 0, shown.length, x, baseline, path)
+            aodGlyphPaint.color = paint.color
+            canvas.drawPath(path, aodGlyphPaint)
+
+            val top = baseline + paint.ascent()
+            val bottom = baseline + paint.descent()
+            // Nothing has been played yet: the line is plain text, no holes in it.
+            val punchRight = filledRight.coerceAtMost(x + available)
+            if (punchRight <= x) return
+            val cell = aodDotCell()
+            dotPaint.shader = dotShader(cell, Color.BLACK)
+            dotPaint.color = Color.BLACK
+            val layer = canvas.saveLayer(x, top, punchRight, bottom, null)
+            canvas.clipPath(path)
+            canvas.clipRect(x, top, punchRight, bottom)
+            dotPaint.shader!!.setLocalMatrix(dotPhaseMatrix())
+            canvas.drawRect(x, top, punchRight, bottom, dotPaint)
+            canvas.restoreToCount(layer)
+            dotPaint.shader = null
+        } catch (t: Throwable) {
+            Log.w("PillView AOD text failed", t)
+        }
+    }
+
+    /** The owner's dot spacing, in pixels. */
+    private fun aodDotCell(): Float = dp(TuningStore.aodDotCellDp(context).toFloat())
+
+    /**
+     * The owner's dot diameter in pixels, capped at the spacing so bigger dots thicken the lattice
+     * without fusing into a solid bar.
+     */
+    private fun aodDotRadius(cell: Float): Float {
+        val r = dp(TuningStore.aodDotSizeDp(context).toFloat()) / 2f
+        return r.coerceIn(1f, (cell / 2f).coerceAtLeast(1f))
+    }
+
+    /** One dot per cell, the cells offset like a checkerboard, which reads as a diagonal lattice. */
+    private fun dotShader(cell: Float = 0f, color: Int = titlePaint.color): BitmapShader {
+        val cell = if (cell > 0f) cell else aodDotCell()
+        val radius = aodDotRadius(cell)
+        val key = ((color.toLong() and 0xFFFFFFFFL) shl 20) or
+            (cell.toLong() shl 8) or radius.toLong()
+        dotShaders[key]?.let { return it }
+        val size = (cell * 2f).toInt().coerceAtLeast(6)
+        val s = size.toFloat()
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
+        c.drawCircle(s * 0.25f, s * 0.25f, radius, p)
+        c.drawCircle(s * 0.75f, s * 0.75f, radius, p)
+        val shader = BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        dotShaders[key] = shader
+        return shader
+    }
+
+    /**
+     * Moves the lattice on by this frame: a random target direction every few seconds, eased into,
+     * then wrapped to one tile so the offset never grows without bound.
+     */
+    private fun advanceDrift(cell: Float) {
+        val now = SystemClock.uptimeMillis()
+        val last = driftLastAt
+        driftLastAt = now
+        if (last == 0L) return
+        val dt = (now - last).coerceIn(0L, 50L)
+        if (now >= driftNextTurnAt) {
+            // Slow enough to read as drifting, never as a strobe.
+            val speed = dp(2f) + driftRandom.nextFloat() * dp(6f)
+            val angle = driftRandom.nextDouble() * Math.PI * 2
+            driftTargetX = (Math.cos(angle) * speed).toFloat()
+            driftTargetY = (Math.sin(angle) * speed).toFloat()
+            driftNextTurnAt = now + DRIFT_TURN_MIN_MS +
+                (driftRandom.nextFloat() * (DRIFT_TURN_MAX_MS - DRIFT_TURN_MIN_MS)).toLong()
+        }
+        // Exponential approach to the target, frame-rate independent.
+        val k = (dt / DRIFT_EASE_MS).coerceIn(0f, 1f)
+        driftVelX += (driftTargetX - driftVelX) * k
+        driftVelY += (driftTargetY - driftVelY) * k
+        val tile = cell * 2f
+        if (tile <= 0f) return
+        driftX = (driftX + driftVelX * (dt / 1000f)) % tile
+        driftY = (driftY + driftVelY * (dt / 1000f)) % tile
+    }
+
+    /** Both the fill and the text place the lattice at the same offset, so they stay aligned. */
+    private fun dotPhaseMatrix(): Matrix =
+        Matrix().apply { setTranslate(-driftX, -driftY) }
 
     /**
      * The expanded media scrubber. Dragging it previews a position (the time label follows the
@@ -695,9 +1044,9 @@ class PillView(context: Context) : View(context) {
 
             seekTouch.set(
                 left - dp(6f),
-                cy - dp(11f),
+                cy - dp(11f) + topPadPx,
                 left + trackW + dp(6f),
-                cy + dp(11f)
+                cy + dp(11f) + topPadPx
             )
             seekVisible = true
         } catch (t: Throwable) {
@@ -1025,7 +1374,10 @@ class PillView(context: Context) : View(context) {
             val cx = area.centerX()
             val cy = area.centerY()
             val dir = if (backwards) -1f else 1f
-            val barX = cx - dir * size * 0.42f
+            // The bar sits on the side the arrow points to, the way the transport glyphs read:
+            // "⏮" is bar-then-left-arrow, "⏭" is right-arrow-then-bar. With the bar on the
+            // opposite side both buttons showed the other one's direction.
+            val barX = cx + dir * size * 0.42f
             card.set(
                 barX - size * 0.07f,
                 cy - size / 2f,
@@ -1034,9 +1386,9 @@ class PillView(context: Context) : View(context) {
             )
             canvas.drawRoundRect(card, size * 0.05f, size * 0.05f, glyphFill)
             val path = Path().apply {
-                moveTo(cx + dir * size * 0.34f, cy - size / 2f)
-                lineTo(cx - dir * size * 0.1f, cy)
-                lineTo(cx + dir * size * 0.34f, cy + size / 2f)
+                moveTo(cx - dir * size * 0.3f, cy - size / 2f)
+                lineTo(cx + dir * size * 0.12f, cy)
+                lineTo(cx - dir * size * 0.3f, cy + size / 2f)
                 close()
             }
             canvas.drawPath(path, glyphFill)
@@ -1129,7 +1481,21 @@ class PillView(context: Context) : View(context) {
 
     // ----------------------------------------------------------------- input
 
+    /**
+     * False while another surface owns the screen - the shade, in particular. The window is made
+     * untouchable too, so this is the second line of defence rather than the only one.
+     */
+    var interactive = true
+
+    /**
+     * Whether a pill with no item shows the idle line. Only the status bar pill has a placeholder
+     * to fall back on; the lock pill and the popup are content surfaces, and a placeholder must
+     * never appear on the lock screen - not even for the first frame of a boot.
+     */
+    var allowIdle = true
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!interactive) return false
         try {
             // An idle status bar pill (placeholder text or logo) is not a control: there is
             // nothing to expand into and nothing to swipe to, so it neither reacts to a tap nor
@@ -1139,7 +1505,24 @@ class PillView(context: Context) : View(context) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
                     downY = event.y
+                    downRawX = event.rawX
+                    downRawY = event.rawY
                     dragging = false
+                    dragAxis = 0
+                    dragGrip = DRAG_GRIP_START
+                    lastMoveAt = event.eventTime
+                    // A new touch takes over from any spring still running: leaving it to finish
+                    // would fight the finger, and cancelling it without this reset is what left a
+                    // stale offset behind.
+                    if (dragAnimator?.isRunning == true) {
+                        dragAnimator?.cancel()
+                        dragAnimator = null
+                        dragX = 0f
+                        dragY = 0f
+                        publishOffset()
+                        sentX = 0
+                        sentY = 0
+                    }
                     seeking = seekVisible && seekTouch.contains(event.x, event.y)
                     if (seeking) {
                         seekFraction = fractionAt(event.x)
@@ -1154,23 +1537,40 @@ class PillView(context: Context) : View(context) {
                         return true
                     }
                     if (idle) return true
-                    val dx = event.x - downX
-                    val dy = event.y - downY
-                    if (!dragging && (abs(dx) > dp(6f) || abs(dy) > dp(6f))) {
+                    val dx = event.rawX - downRawX
+                    val dy = event.rawY - downRawY
+                    if (!dragging && dragEnabled && (abs(dx) > dp(6f) || abs(dy) > dp(6f))) {
                         dragAnimator?.cancel()
                         dragging = true
+                        beginDrag()
                     }
                     if (dragging) {
-                        // The card follows the finger. Horizontal drags are damped, because the
-                        // swipe they commit to is a skip rather than a card change.
-                        if (abs(dx) >= abs(dy)) {
-                            dragX = dx * 0.7f
-                            dragY = 0f
-                        } else {
-                            dragX = 0f
-                            dragY = dy
+                        decideDragAxis(dx, dy)
+                        // Catch-up speed from the event clock, so a slow phone and a fast one feel
+                        // the same.
+                        val dt = (event.eventTime - lastMoveAt).coerceIn(0L, 40L)
+                        lastMoveAt = event.eventTime
+                        if (dragAxis != 0) {
+                            dragGrip += (1f - dragGrip) *
+                                (dt / DRAG_CATCHUP_MS).coerceIn(0f, 1f)
                         }
-                        invalidate()
+                        // Sideways drags stay a little damped even once caught up: the swipe they
+                        // commit to is a skip, not a card change.
+                        if (dragAxis == 0) {
+                            // Still guessing: the card leans after the finger but stays rooted, with
+                            // only a little give in any direction - the feel of stretching
+                            // something that is attached in the middle.
+                            dragX = rubberBand(dx)
+                            dragY = rubberBand(dy)
+                        } else {
+                            // Guessed, and following freely now - both axes, not snapped to one.
+                            // The direction guess only decides what a release commits to. The
+                            // service keeps the moved window on screen, so no clamp belongs here:
+                            // it used to be the grown window's padding, which is gone.
+                            dragX = dx * dragGrip
+                            dragY = dy * dragGrip
+                        }
+                        publishOffset()
                     }
                     return true
                 }
@@ -1185,24 +1585,28 @@ class PillView(context: Context) : View(context) {
                     }
                     if (dragging) {
                         dragging = false
-                        val dx = event.x - downX
-                        val dy = event.y - downY
+                        val dx = event.rawX - downRawX
+                        val dy = event.rawY - downRawY
                         // A short drag springs back untouched; a long one commits.
                         val threshold = maxOf(dp(44f), height * 0.3f)
-                        if (abs(dx) >= abs(dy)) {
+                        // Commit along the axis the drag actually settled on, not on whichever
+                        // delta happens to be bigger at the moment the finger lifts.
+                        val sideways = if (dragAxis != 0) dragAxis == 1 else abs(dx) >= abs(dy)
+                        dragAxis = 0
+                        if (sideways) {
                             if (abs(dx) >= threshold) {
                                 onSwipe?.invoke(if (dx > 0f) 1 else -1, 0)
-                                settleBack(240L)
+                                settleBack(320L)
                             } else {
                                 springHome()
                             }
                         } else {
                             if (abs(dy) >= threshold) {
-                                // Hand the vertical offset over to animateSwap, which slides the
-                                // incoming card in from the side the finger left.
-                                dragY = 0f
-                                invalidate()
+                                // animateSwap slides the incoming card in; the window eases back to
+                                // its resting place underneath it, and endDrag runs when that
+                                // settle finishes rather than on a timer.
                                 onSwipe?.invoke(0, if (dy > 0f) 1 else -1)
+                                settleBack(320L)
                             } else {
                                 springHome()
                             }
@@ -1210,8 +1614,12 @@ class PillView(context: Context) : View(context) {
                         return true
                     }
                     if (idle) return true
+                    // The rects are in card coordinates, so a card that is still springing back
+                    // from a drag has to be hit-tested where it is drawn, not where it will be.
+                    val hitX = event.x - dragX
+                    val hitY = event.y - dragY
                     for (i in controlRects.indices) {
-                        if (controlRects[i].contains(event.x, event.y)) {
+                        if (controlRects[i].contains(hitX, hitY)) {
                             onControl?.invoke(controlKeys[i])
                             return true
                         }
@@ -1220,11 +1628,17 @@ class PillView(context: Context) : View(context) {
                     return true
                 }
                 MotionEvent.ACTION_OUTSIDE -> {
+                    // The window moves with the finger, so the *end* of a drag can land outside the
+                    // window it started in and arrive here as an outside touch. That is the same
+                    // gesture, not a tap elsewhere: dropping it kept the popup from collapsing
+                    // under the finger the moment the drag began.
+                    if (dragging || seeking) return true
                     onOutsideTouch?.invoke()
                     return true
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     dragging = false
+                    dragAxis = 0
                     seeking = false
                     seekFraction = -1f
                     springHome()
@@ -1237,6 +1651,44 @@ class PillView(context: Context) : View(context) {
         return true
     }
 
+    /**
+     * Elastic give while the direction is still unknown: follows the finger a little and then
+     * resists, in whichever direction it is pulled, and never beyond [room].
+     */
+    private fun rubberBand(delta: Float): Float {
+        val limit = dp(DRAG_GIVE_DP)
+        val sign = if (delta < 0f) -1f else 1f
+        val pull = abs(delta)
+        return sign * (pull * limit) / (pull + limit)
+    }
+
+    /**
+     * Guesses which way the drag is going, once. The offset itself is not locked to that axis: after
+     * the guess the card follows the finger freely in both directions, and the guess only decides
+     * what a release commits to.
+     */
+    private fun decideDragAxis(dx: Float, dy: Float) {
+        if (dragAxis != 0) return
+        val ax = abs(dx)
+        val ay = abs(dy)
+        val far = maxOf(ax, ay)
+        if (far < dp(DRAG_LOCK_DP)) return
+        if (ay > ax * DRAG_LOCK_RATIO) {
+            dragAxis = 2
+        } else if (ax > ay * DRAG_LOCK_RATIO) {
+            dragAxis = 1
+        } else if (far >= dp(DRAG_FORCE_LOCK_DP)) {
+            // Still diagonal after this much travel: take the longer side rather than staying in
+            // the damped "stretched" state, where the card barely follows the finger.
+            dragAxis = if (ax >= ay) 1 else 2
+        }
+        if (dragAxis != 0) {
+            // Catches up from the stretched position instead of jumping: the grip starts partway
+            // and eases to 1 over the next few frames.
+            dragGrip = DRAG_GRIP_START
+        }
+    }
+
     /** Where a touch falls on the seek track, as a 0..1 fraction. */
     private fun fractionAt(x: Float): Float {
         val left = seekTouch.left + dp(6f)
@@ -1244,15 +1696,104 @@ class PillView(context: Context) : View(context) {
         return ((x - left) / width).coerceIn(0f, 1f)
     }
 
-    /** Too short to commit: the card bounces back to its place with a little overshoot. */
+    /** Asks the owner for room around the card, once per drag. */
+    private fun beginDrag() {
+        if (dragWindowOpen) return
+        dragWindowOpen = true
+        try {
+            onDragStart?.invoke()
+        } catch (t: Throwable) {
+            Log.w("PillView.onDragStart threw", t)
+        }
+    }
+
+    /** The card is back in place: the window can close up again. */
+    private fun endDrag() {
+        if (!dragWindowOpen) return
+        dragWindowOpen = false
+        try {
+            onDragEnd?.invoke()
+        } catch (t: Throwable) {
+            Log.w("PillView.onDragEnd threw", t)
+        }
+    }
+
+    /** True while the card is still sliding back into place after a drag. */
+    fun isSettling(): Boolean = dragAnimator?.isRunning == true
+
+    /**
+     * Hands the current offset to the service as a delta, so the window can move with it. Called
+     * from the touch handler and from every frame of the settle animation, which is what makes the
+     * return to place a slide instead of a jump.
+     */
+    private fun publishOffset() {
+        try {
+            if (dragMovesWindow) {
+                val tx = dragX.toInt()
+                val ty = dragY.toInt()
+                val ddx = tx - sentX
+                val ddy = ty - sentY
+                if (ddx != 0 || ddy != 0) {
+                    sentX = tx
+                    sentY = ty
+                    onDragMove?.invoke(ddx, ddy)
+                }
+            }
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.publishOffset threw", t)
+        }
+    }
+
+    /**
+     * Too short to commit: the card slides back into place.
+     *
+     * Deliberately unhurried (about 0.7 s) and without an overshoot: a drag that did not take
+     * should read as the card being eased back into its slot, not as it snapping away. The long
+     * tail of the decelerate curve is what makes the last few dp visible instead of instant.
+     */
     private fun springHome() {
-        animateDragTo(0f, 0f, 280L, OvershootInterpolator(1.7f))
+        if (dragMovesWindow) {
+            handOverReturn()
+            return
+        }
+        animateDragTo(0f, 0f, RETURN_MS, DecelerateInterpolator(2.2f))
     }
 
     /** Committed: the card eases home while the new card or track lands. */
     private fun settleBack(durationMs: Long) {
-        animateDragTo(0f, 0f, durationMs, DecelerateInterpolator(1.5f))
+        if (dragMovesWindow) {
+            handOverReturn()
+            return
+        }
+        animateDragTo(0f, 0f, maxOf(durationMs, RETURN_MS), DecelerateInterpolator(2.2f))
     }
+
+    /**
+     * The return belongs to whoever moved the window during the drag.
+     *
+     * When the window itself follows the finger, an offset animation here moves the card back as
+     * well, and the two motions add up to a detour: the card goes one way, the window the other,
+     * and the end position is neither. So the offsets are dropped without a word and the service
+     * eases the window from wherever the finger left it straight to the resting spot.
+     */
+    private fun handOverReturn() {
+        try {
+            dragAnimator?.cancel()
+            dragAnimator = null
+            dragX = 0f
+            dragY = 0f
+            sentX = 0
+            sentY = 0
+            invalidate()
+            endDrag()
+        } catch (t: Throwable) {
+            Log.w("PillView handOverReturn threw", t)
+        }
+    }
+
+    /** How long an aborted drag takes to slide back home. */
+    private val RETURN_MS = 700L
 
     private fun animateDragTo(toX: Float, toY: Float, durationMs: Long, curve: TimeInterpolator) {
         try {
@@ -1267,7 +1808,7 @@ class PillView(context: Context) : View(context) {
                     val f = it.animatedValue as Float
                     dragX = fromX + (toX - fromX) * f
                     dragY = fromY + (toY - fromY) * f
-                    invalidate()
+                    publishOffset()
                 }
             }
             anim.addListener(object : android.animation.AnimatorListenerAdapter() {
@@ -1275,7 +1816,10 @@ class PillView(context: Context) : View(context) {
                     if (dragAnimator === animation) {
                         dragX = toX
                         dragY = toY
-                        invalidate()
+                        publishOffset()
+                        sentX = 0
+                        sentY = 0
+                        if (toX == 0f && toY == 0f) endDrag()
                     }
                 }
             })

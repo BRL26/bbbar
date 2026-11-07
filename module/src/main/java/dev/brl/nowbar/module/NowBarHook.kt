@@ -3,6 +3,7 @@ package dev.brl.nowbar.module
 import android.content.Context
 import android.database.ContentObserver
 import android.os.Build
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -11,6 +12,7 @@ import android.view.ViewGroup
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.io.File
 import java.util.IdentityHashMap
@@ -63,8 +65,65 @@ class NowBarHook : IXposedHookLoadPackage {
          */
         const val KEY_SB_HIDDEN = "bbbar_sb_hidden"
 
-        /** How often the bar's own visibility is sampled. Cheap: one isShown() walk. */
-        private const val VIS_VISIT_MS = 400L
+        /**
+         * Right edge of the status bar's clock, in screen pixels, or 0 when the clock is not on
+         * screen (the shade draws its own instead). The pill lives in the same strip, so it needs
+         * to know where the clock actually ends - that is the difference between a pill that clears
+         * the time in landscape and one that clips it.
+         */
+        const val KEY_CLOCK_RIGHT = "bbbar_clock_right_px"
+
+        /**
+         * The screen size as SystemUI sees it. An accessibility-service process keeps its own display
+         * metrics from when it started, so after a rotation it still reports the old orientation -
+         * SystemUI's configuration does update, so its answer is the one to trust.
+         */
+        const val KEY_SCREEN_W = "bbbar_screen_w"
+        const val KEY_SCREEN_H = "bbbar_screen_h"
+
+        /** How often the clock's edge is sampled. Writes only when it changes. */
+        private const val CLOCK_VISIT_MS = 500L
+
+        /** Candidate ids for the clock in the status bar, newest first. */
+        private val CLOCK_ID_NAMES = listOf("clock", "status_bar_clock")
+
+        /**
+         * 1 while the shade or Quick Settings is open. Pushed the same way as the bar's visibility,
+         * from the shade window's own state: that screen lays its header out differently, so the
+         * pill can be given its own position there.
+         */
+        const val KEY_SHADE_OPEN = "bbbar_shade_open"
+
+        /**
+         * Verified on Nothing OS 5.0 (classes7.dex): `shade/NotificationShadeWindowControllerImpl`
+         * has `apply(NotificationShadeWindowState)`, called on every state change, and that state
+         * carries `shadeOrQsExpanded`.
+         */
+        private const val SHADE_CONTROLLER =
+            "com.android.systemui.shade.NotificationShadeWindowControllerImpl"
+        private const val SHADE_STATE = "com.android.systemui.shade.NotificationShadeWindowState"
+        private const val SHADE_EXPANDED_FIELD = "shadeOrQsExpanded"
+
+        /**
+         * Fallback only: how often the bar view is sampled when the window-state push could not be
+         * hooked. Slow, because this signal cannot see a bar faded out by the window manager.
+         */
+        private const val VIS_VISIT_MS = 500L
+
+        /** `StatusBarManager.WINDOW_STATUS_BAR`: the window id this state is about. */
+        private const val WINDOW_STATUS_BAR = 1
+
+        /** `StatusBarManager.WINDOW_STATE_SHOWING`: everything else means on its way out. */
+        private const val WINDOW_STATE_SHOWING = 0
+
+        /**
+         * The class that receives `CommandQueue.Callbacks.setWindowState` for the status bar
+         * window - the push the platform gives SystemUI. Verified on Nothing OS 5.0 (SystemUI
+         * classes8.dex): `statusbar/window/StatusBarWindowStateController`, private
+         * `setWindowState(int displayId, int window, int state)`.
+         */
+        private const val STATUS_BAR_WINDOW_STATE =
+            "com.android.systemui.statusbar.window.StatusBarWindowStateController"
 
         /** Verified on Nothing OS 5.0: res/layout/status_bar.xml, id 0x7f0b0718. */
         private const val ID_NAME_ICON_AREA = "notification_icon_area"
@@ -79,21 +138,47 @@ class NowBarHook : IXposedHookLoadPackage {
     /** Only one heartbeat loop per SystemUI process. */
     private var beating = false
 
+    /** Only one window-state hook per SystemUI process, however many bars are attached. */
+    private var hookedPush = false
+
+    /** Only one shade-state hook per SystemUI process. */
+    private var hookedShade = false
+
+    /** Last shade value pushed, so the log and the provider only see real changes. */
+    private var lastShadeOpen: Boolean? = null
+
+    /** Set once the state field is missing on a changed build, so it is not re-read every frame. */
+    private var shadeFieldMissing = false
+
+    /** Only one clock sampler per SystemUI process. */
+    private var clockWatching = false
+
+    /** The status bar clock, once found; the tree is only walked until it is. */
+    private var clockView: View? = null
+
+    /** Last clock edge published, so a steady bar costs no provider writes. */
+    private var lastClockRight = -1
+
+    /** Last screen size published, so a steady screen costs no provider writes. */
+    private var lastScreenW = -1
+    private var lastScreenH = -1
+
+    /** Context of the status bar view, so the window-state push can publish. */
+    private var barContext: Context? = null
+
+    /** Last value pushed, so a burst of identical states costs no provider writes. */
+    private var lastPublishedHidden: Boolean? = null
+
     /**
-     * Publishes "the hook is running" into Settings.Global and keeps it fresh, and samples whether
-     * the status bar is actually visible. SystemUI holds WRITE_SECURE_SETTINGS on this build, so no
-     * extra permission or root is involved.
-     *
-     * Both writes happen on the same tick, but a write only lands when the value changes, so a
-     * steady bar costs one isShown() walk every [VIS_VISIT_MS] and no provider traffic.
+     * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
+     * WRITE_SECURE_SETTINGS on this build, so no extra permission or root is involved.
      */
-    private fun startHeartbeat(context: Context, statusBar: View) {
+    private fun startHeartbeat(context: Context) {
         if (beating) return
         beating = true
         try {
             val main = Handler(Looper.getMainLooper())
             var lastBeat = 0L
-            var lastHidden: Boolean? = null
             val tick = object : Runnable {
                 override fun run() {
                     val now = android.os.SystemClock.elapsedRealtime()
@@ -105,30 +190,267 @@ class NowBarHook : IXposedHookLoadPackage {
                     } catch (t: Throwable) {
                         Log.w("hook: heartbeat write failed", t)
                     }
-                    try {
-                        // isShown() is false when the bar or any of its parents is gone, which is
-                        // exactly what SystemUI does for an immersive app.
-                        val hidden = !statusBar.isShown
-                        if (hidden != lastHidden) {
-                            lastHidden = hidden
-                            Settings.Global.putInt(
-                                context.contentResolver,
-                                KEY_SB_HIDDEN,
-                                if (hidden) 1 else 0
-                            )
-                            Log.i("hook: status bar ${if (hidden) "hidden" else "visible"}")
+                    main.postDelayed(this, BEAT_MS / 3)
+                }
+            }
+            main.post(tick)
+        } catch (t: Throwable) {
+            beating = false
+            Log.w("hook: heartbeat start failed", t)
+        }
+    }
+
+    /**
+     * The push the system gives SystemUI: `CommandQueue.Callbacks.setWindowState` delivers the
+     * status bar window's show/hide state, and [STATUS_BAR_WINDOW_STATE] is where that lands. Hooking
+     * that method is the equivalent of a webhook - the platform calls us the moment the bar changes,
+     * instead of us asking over and over. It is also the only signal that catches a bar hidden by
+     * the window manager: those hides scale the window's own surface, which no view property shows.
+     *
+     * Returns false when the class or method is not on this build, so the caller can fall back to
+     * sampling the view.
+     */
+    private fun hookWindowStatePush(loader: ClassLoader): Boolean {
+        return try {
+            val cls = Class.forName(STATUS_BAR_WINDOW_STATE, false, loader)
+            XposedHelpers.findAndHookMethod(
+                cls,
+                "setWindowState",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val window = param.args[1] as? Int ?: return
+                            val state = param.args[2] as? Int ?: return
+                            if (window != WINDOW_STATUS_BAR) return
+                            publishHidden(state != WINDOW_STATE_SHOWING)
+                        } catch (t: Throwable) {
+                            Log.w("hook: window state push failed", t)
                         }
+                    }
+                }
+            )
+            Log.i("hook: status bar window state is pushed to us ($STATUS_BAR_WINDOW_STATE)")
+            true
+        } catch (t: Throwable) {
+            Log.w("hook: window state push unavailable, sampling the bar instead", t)
+            false
+        }
+    }
+
+    /**
+     * The shade's open/closed state, pushed the same way as the bar's: the controller applies a new
+     * state object on every change, and that object says whether the shade is expanded.
+     */
+    private fun hookShadePush(loader: ClassLoader): Boolean {
+        return try {
+            val controller = Class.forName(SHADE_CONTROLLER, false, loader)
+            val state = Class.forName(SHADE_STATE, false, loader)
+            XposedHelpers.findAndHookMethod(
+                controller,
+                "apply",
+                state,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (shadeFieldMissing) return
+                            val value = param.args[0] ?: return
+                            val open = XposedHelpers.getBooleanField(value, SHADE_EXPANDED_FIELD)
+                            publishShade(open)
+                        } catch (t: Throwable) {
+                            shadeFieldMissing = true
+                            Log.w("hook: shade state field not readable, not watching it", t)
+                        }
+                    }
+                }
+            )
+            Log.i("hook: shade state is pushed to us ($SHADE_CONTROLLER#apply)")
+            true
+        } catch (t: Throwable) {
+            Log.w("hook: shade state push unavailable", t)
+            false
+        }
+    }
+
+    /** Writes the shade's state for the app to observe. */
+    private fun publishShade(open: Boolean) {
+        if (open == lastShadeOpen) return
+        val context = barContext ?: return
+        lastShadeOpen = open
+        try {
+            Settings.Global.putInt(context.contentResolver, KEY_SHADE_OPEN, if (open) 1 else 0)
+            Log.i("hook: shade ${if (open) "open" else "closed"} (pushed)")
+        } catch (t: Throwable) {
+            Log.w("hook: shade write failed", t)
+        }
+    }
+
+    /** Writes the bar's state for the app to observe, and beats so it is known to be live. */
+    private fun publishHidden(hidden: Boolean) {
+        if (hidden == lastPublishedHidden) return
+        val context = barContext ?: return
+        lastPublishedHidden = hidden
+        try {
+            Settings.Global.putInt(context.contentResolver, KEY_SB_HIDDEN, if (hidden) 1 else 0)
+            Settings.Global.putLong(
+                context.contentResolver,
+                KEY_HOOK_BEAT,
+                android.os.SystemClock.elapsedRealtime()
+            )
+            Log.i("hook: status bar ${if (hidden) "hidden" else "visible"} (pushed)")
+        } catch (t: Throwable) {
+            Log.w("hook: visibility write failed", t)
+        }
+    }
+
+    /**
+     * The clock's right edge, so the pill can clear the time instead of guessing a margin. On this
+     * build the clock is in the status bar's start side, which is exactly where a left-aligned pill
+     * wants to be - and in landscape it is a different width, which is why a fixed dp offset clipped
+     * it. Zero means "no clock on screen", which is the shade's case.
+     */
+    private fun sampleClock(statusBar: View) {
+        try {
+            val main = Handler(Looper.getMainLooper())
+            val tick = object : Runnable {
+                override fun run() {
+                    try {
+                        val clock = clockView ?: findByIdNames(statusBar, CLOCK_ID_NAMES)?.also {
+                            clockView = it
+                            Log.i("hook: clock found (${it.javaClass.simpleName}, id name matched)")
+                        }
+                        if (clock != null) publishClock(clock)
+                        publishScreen(statusBar)
+                    } catch (t: Throwable) {
+                        Log.w("hook: clock sample failed", t)
+                    }
+                    main.postDelayed(this, CLOCK_VISIT_MS)
+                }
+            }
+            main.post(tick)
+        } catch (t: Throwable) {
+            Log.w("hook: clock sampler failed to start", t)
+        }
+    }
+
+    /** Writes the screen size SystemUI currently sees, so a rotation reaches the app at once. */
+    private fun publishScreen(statusBar: View) {
+        val context = barContext ?: return
+        val dm = context.resources.displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+        if (w <= 0 || h <= 0) return
+        if (w == lastScreenW && h == lastScreenH) return
+        lastScreenW = w
+        lastScreenH = h
+        try {
+            Settings.Global.putInt(context.contentResolver, KEY_SCREEN_W, w)
+            Settings.Global.putInt(context.contentResolver, KEY_SCREEN_H, h)
+            Log.i("hook: screen ${w}x${h} (statusBar ${statusBar.width}x${statusBar.height})")
+        } catch (t: Throwable) {
+            Log.w("hook: screen write failed", t)
+        }
+    }
+
+    /** Writes the clock's right edge, or 0 when it is faded out or gone. */
+    private fun publishClock(clock: View) {
+        val context = barContext ?: return
+        val visible = clock.isShown && clock.alpha > 0.5f && clock.width > 0
+        val right = if (!visible) {
+            0
+        } else {
+            val loc = IntArray(2)
+            clock.getLocationOnScreen(loc)
+            loc[0] + clock.width
+        }
+        if (right == lastClockRight) return
+        lastClockRight = right
+        try {
+            Settings.Global.putInt(context.contentResolver, KEY_CLOCK_RIGHT, right)
+            Log.i("hook: clock right edge = ${right}px")
+        } catch (t: Throwable) {
+            Log.w("hook: clock write failed", t)
+        }
+    }
+
+    /** Depth-first search for a view whose resource id name is one of [names]. */
+    private fun findByIdNames(view: View, names: List<String>): View? {
+        try {
+            if (view.id != View.NO_ID) {
+                val name = try {
+                    view.resources.getResourceEntryName(view.id)
+                } catch (t: Throwable) {
+                    null
+                }
+                if (name != null && names.any { it == name }) return view
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    val child = view.getChildAt(i) ?: continue
+                    findByIdNames(child, names)?.let { return it }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: id walk threw", t)
+        }
+        return null
+    }
+
+    /**
+     * Fallback when the push is unavailable: sample the bar view. Slower and blind to a bar that is
+     * faded out by the window manager, but better than nothing on a changed build.
+     */
+    private fun startVisibilitySampling(statusBar: View) {
+        try {
+            val main = Handler(Looper.getMainLooper())
+            val tick = object : Runnable {
+                override fun run() {
+                    try {
+                        publishHidden(barHidden(statusBar))
                     } catch (t: Throwable) {
                         Log.w("hook: visibility write failed", t)
                     }
                     main.postDelayed(this, VIS_VISIT_MS)
                 }
             }
-            // Sample once immediately, so a restart into a fullscreen app is not a stale read.
             main.post(tick)
+            Log.i("hook: sampling the bar every ${VIS_VISIT_MS}ms")
         } catch (t: Throwable) {
-            beating = false
-            Log.w("hook: heartbeat start failed", t)
+            Log.w("hook: visibility sampling failed to start", t)
+        }
+    }
+
+    /** Reused by [barHidden]; the hook runs on the main thread only. */
+    private val barRect = Rect()
+
+    /**
+     * Whether the status bar has really left the screen.
+     *
+     * `isShown` on its own was not enough: a bar that slides up for an immersive app, or one that
+     * fades out under the shade, is still attached and still counts as shown, so the pill stayed
+     * floating in a strip the bar had already vacated. This weighs three things instead - detached,
+     * faded, or mostly scrolled off the top of the display.
+     */
+    private fun barHidden(bar: View): Boolean {
+        return try {
+            if (!bar.isShown) return true
+            if (bar.alpha < 0.5f) return true
+            // Nothing OS fades the bar out on the home screen instead of moving it, and that fade
+            // can sit on the window's own root view rather than on the bar itself.
+            val root = bar.rootView
+            if (root !== bar && root.alpha < 0.5f) return true
+            // False when nothing of the view is on screen at all.
+            if (!bar.getGlobalVisibleRect(barRect)) return true
+            val h = bar.height
+            if (h <= 0) return false
+            // A bar sliding up is still partly visible for a few frames; it only counts as gone
+            // once most of it is off the top.
+            barRect.height().toFloat() / h < 0.5f
+        } catch (t: Throwable) {
+            Log.w("hook: visibility read failed", t)
+            false
         }
     }
 
@@ -173,9 +495,20 @@ class NowBarHook : IXposedHookLoadPackage {
     private fun attach(statusBar: View) {
         try {
             val context = statusBar.context ?: return
+            barContext = context
             // Before the icon-area search on purpose: the hook is loaded either way, and the row
             // should say so even if the strip could not be identified on a changed build.
-            startHeartbeat(context, statusBar)
+            startHeartbeat(context)
+            // The bar's visibility is pushed by the system; sampling is only the fallback.
+            if (!hookedPush) {
+                hookedPush = hookWindowStatePush(statusBar.javaClass.classLoader)
+                if (!hookedPush) startVisibilitySampling(statusBar)
+            }
+            if (!hookedShade) hookedShade = hookShadePush(statusBar.javaClass.classLoader)
+            if (!clockWatching) {
+                clockWatching = true
+                sampleClock(statusBar)
+            }
             val area = findIconArea(statusBar)
             if (area == null) {
                 Log.w("hook: notification icon area not found, icons left alone")

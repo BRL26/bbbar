@@ -107,6 +107,60 @@ object NowBarState {
         }
     }
 
+    /**
+     * The same fakes the settings screen switches on, reachable from adb - handy when the pill is on
+     * a screen the UI cannot be reached from:
+     *
+     *   adb shell am broadcast -a dev.brl.nowbar.module.SET \
+     *     -n dev.brl.nowbar.module/.TuningReceiver --es fake media
+     *   adb shell am broadcast ... --es fake none
+     */
+    fun applyFake(which: String) {
+        try {
+            when (which.lowercase()) {
+                "media" -> putSimulated(
+                    NowBarItem(
+                        id = "fake|media",
+                        kind = ItemKind.MEDIA,
+                        title = "Test track",
+                        subtitle = "Test artist",
+                        progress = 0.35f,
+                        playing = true,
+                        positionMs = 70_000L,
+                        durationMs = 200_000L
+                    )
+                )
+                "timer" -> putSimulated(
+                    NowBarItem(
+                        id = "fake|timer",
+                        kind = ItemKind.TIMER,
+                        title = "Test timer",
+                        subtitle = "5:00",
+                        progress = 0.4f
+                    )
+                )
+                "live" -> putSimulated(
+                    NowBarItem(
+                        id = "fake|live",
+                        kind = ItemKind.LIVE,
+                        title = "Ride arriving",
+                        subtitle = "12 min",
+                        progress = 0.2f
+                    )
+                )
+                else -> {
+                    removeSimulated(ItemKind.MEDIA)
+                    removeSimulated(ItemKind.TIMER)
+                    removeSimulated(ItemKind.LIVE)
+                }
+            }
+            Log.i("fake card: $which")
+            onChange?.invoke()
+        } catch (t: Throwable) {
+            Log.w("applyFake failed", t)
+        }
+    }
+
     fun clearSimulated() {
         try {
             if (simulated.isEmpty()) return
@@ -118,6 +172,56 @@ object NowBarState {
     }
 
     fun isSimulated(kind: ItemKind): Boolean = simulated.containsKey(kind)
+
+    /**
+     * A transport command the owner just sent, held over the session's own state until the player
+     * reports it back (or the hold expires). Without it the next tick re-read the player's old
+     * snapshot and the scrubber snapped back to where it was before the seek, which reads exactly
+     * like the command did nothing.
+     */
+    private class MediaHold(
+        val id: String,
+        val positionMs: Long?,
+        val playing: Boolean?,
+        /** When the command was sent: the held position keeps running from here. */
+        val startedAt: Long,
+        val until: Long
+    )
+
+    private var mediaHold: MediaHold? = null
+
+    fun holdMedia(id: String, positionMs: Long?, playing: Boolean?, holdMs: Long = 1_500L) {
+        try {
+            val now = SystemClock.uptimeMillis()
+            mediaHold = MediaHold(id, positionMs, playing, now, now + holdMs)
+        } catch (t: Throwable) {
+            Log.w("holdMedia failed", t)
+        }
+    }
+
+    /** Applies a pending command over the item the player just reported. */
+    private fun withHold(item: NowBarItem): NowBarItem {
+        val hold = mediaHold ?: return item
+        if (SystemClock.uptimeMillis() > hold.until) {
+            mediaHold = null
+            return item
+        }
+        if (hold.id != item.id) return item
+        val playing = hold.playing ?: item.playing
+        val duration = item.durationMs
+        // A held command is a *prediction*, not a freeze: the position it set keeps running while
+        // the player catches up. Pinning it made the elapsed time stop dead for the length of the
+        // hold right after a seek, which looked like the bar had seized up.
+        val elapsed = (SystemClock.uptimeMillis() - hold.startedAt).coerceAtLeast(0L)
+        val base = hold.positionMs ?: item.positionMs
+        var position = if (playing) base + elapsed else base
+        if (duration > 0L) position = position.coerceAtMost(duration)
+        return item.copy(
+            positionMs = position,
+            playing = playing,
+            progress = if (duration > 0L) (position.toFloat() / duration) else item.progress
+        )
+    }
 
     /** Highest ranked item whose feature is switched on, or null. */
     fun current(context: Context): NowBarItem? = items(context).firstOrNull()
@@ -153,9 +257,16 @@ object NowBarState {
                 // live even when the source app posted its notification once.
                 item = when (source.kind) {
                     ItemKind.TIMER -> tickTimer(item)
-                    ItemKind.MEDIA -> tickMedia(context, item)
+                    ItemKind.MEDIA -> withHold(tickMedia(context, item))
                     ItemKind.ALARM -> item
                     ItemKind.LIVE -> item
+                }
+                // A live update at 100% is over. The system keeps its chip up until the app takes
+                // the notification down; a full bar on a pill says nothing, so the card leaves the
+                // stack here and whatever else is active takes its place.
+                if (item.kind == ItemKind.LIVE && item.progress >= 0.999f) {
+                    Log.i("live update ${item.packageName} is at 100%: dropped")
+                    continue
                 }
                 out.add(item)
             }
@@ -236,6 +347,26 @@ object NowBarState {
         }
     }
 
+    /**
+     * The position the player is at *now*.
+     *
+     * `PlaybackState.position` is a snapshot taken at `lastPositionUpdateTime`; a player only posts a
+     * new state when something happens (play, pause, seek, track change), so the raw value sits
+     * still while the track runs. This is why the scrubber used to freeze: it was showing an old
+     * snapshot once a second. Interpolate from the snapshot using the elapsed real time and the
+     * playback speed, the same way the framework's own seek bar does.
+     */
+    internal fun livePosition(state: PlaybackState?): Long {
+        if (state == null) return 0L
+        val base = state.position.coerceAtLeast(0L)
+        if (state.state != PlaybackState.STATE_PLAYING) return base
+        val speed = state.playbackSpeed
+        if (speed <= 0f) return base
+        val since = SystemClock.elapsedRealtime() - state.lastPositionUpdateTime
+        if (since <= 0L || since > 6 * 60 * 60 * 1000L) return base
+        return base + (since * speed).toLong()
+    }
+
     /** Reads position, duration and playing state from the session, once a second. */
     private fun tickMedia(context: Context, item: NowBarItem): NowBarItem {
         val token = item.token ?: return item
@@ -243,7 +374,7 @@ object NowBarState {
             val controller = MediaController(context, token)
             val state = controller.playbackState
             val duration = controller.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-            val position = state?.position ?: 0L
+            val position = livePosition(state).let { if (duration > 0L) it.coerceAtMost(duration) else it }
             val playing = state?.state == PlaybackState.STATE_PLAYING
             item.copy(
                 progress = if (duration > 0L) (position.toFloat() / duration) else -1f,
@@ -324,8 +455,14 @@ class NowBarNotifications : NotificationListenerService() {
             var live: NowBarItem? = null
             for (sbn in active) {
                 val item = parse(sbn)
-                Log.i("rebuild sees ${sbn.packageName}: ${item?.kind ?: "ignored"}")
+                // Verbose on purpose: this runs for every notification on every change, and at info
+                // level it was loud enough to push the placement logs out of the buffer.
+                Log.v("rebuild sees ${sbn.packageName}: ${item?.kind ?: "ignored"}")
                 item ?: continue
+                if (item.finished()) {
+                    Log.v("rebuild: ${sbn.packageName} live update is at 100%, dropping it")
+                    continue
+                }
                 when (item.kind) {
                     ItemKind.MEDIA -> if (media == null) media = item
                     ItemKind.TIMER -> if (timer == null) timer = item
@@ -336,6 +473,7 @@ class NowBarNotifications : NotificationListenerService() {
             // Fold in the promoted items the active list cannot show. A notification that was
             // removed has already left this map, so cancellation still clears the card.
             promoted.values.forEach { item ->
+                if (item.finished()) return@forEach
                 when (item.kind) {
                     ItemKind.MEDIA -> if (media == null) media = item
                     ItemKind.TIMER -> if (timer == null) timer = item
@@ -354,6 +492,14 @@ class NowBarNotifications : NotificationListenerService() {
             Log.w("notification rebuild failed", t)
         }
     }
+
+    /**
+     * A live update whose progress has reached 100% is over. The system keeps its chip up until
+     * the app takes the notification down, but a finished activity on a pill is just noise, so it
+     * stops being an item as soon as the bar fills.
+     */
+    private fun NowBarItem.finished(): Boolean =
+        kind == ItemKind.LIVE && progress >= 0.999f
 
     private fun parse(sbn: StatusBarNotification): NowBarItem? {
         return try {
@@ -415,7 +561,8 @@ class NowBarNotifications : NotificationListenerService() {
         val state = controller?.playbackState
         val playing = state?.state == PlaybackState.STATE_PLAYING
         val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-        val position = state?.position ?: 0L
+        val position = NowBarState.livePosition(state)
+            .let { if (duration > 0L) it.coerceAtMost(duration) else it }
         return NowBarItem(
             id = "media|${sbn.key}",
             kind = ItemKind.MEDIA,

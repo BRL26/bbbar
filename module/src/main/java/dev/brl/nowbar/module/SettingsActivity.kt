@@ -348,6 +348,14 @@ class SettingsActivity : AppCompatActivity() {
             refreshPreviews()
         }
         sliderRow(body, "Height above bottom edge", "bottomDp", TuningStore.DEFAULT_BOTTOM_DP, null)
+        switchRow(
+            body,
+            "Greyscale on the always-on display",
+            "Fades to grey with the AOD screen, back to colour on wake",
+            TuningStore.isOn(this, TuningStore.AOD_GRAY)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.AOD_GRAY, on).apply()
+        }
     }
 
     private fun statusBarCard() {
@@ -389,7 +397,9 @@ class SettingsActivity : AppCompatActivity() {
                 "restart after installing. Restart it from Test tooling below.\n\n" +
                 "The hook writes a heartbeat every 30 s, and this row follows it: if SystemUI " +
                 "restarts without the hook, the beat goes stale and the row says how long ago. " +
-                "The pill itself is an accessibility overlay and never depends on the hook."
+                "The pill itself is an accessibility overlay and never depends on the hook.\n\n" +
+                "The hook also watches the bar's own visibility, so the pill now leaves with the " +
+                "status bar when a fullscreen app hides it and comes back with it."
         )
     }
 
@@ -444,6 +454,19 @@ class SettingsActivity : AppCompatActivity() {
         sliderRow(body, "Corner radius (0 = pill)", "popupRadiusDp", TuningStore.DEFAULT_POPUP_RADIUS_DP, null)
         sliderRow(body, "Left edge (-1 = centred)", "popupLeftDp", TuningStore.DEFAULT_POPUP_LEFT_DP, null)
         sliderRow(body, "Top edge (-1 = below status bar)", "popupTopDp", TuningStore.DEFAULT_POPUP_TOP_DP, null)
+        sliderRow(
+            body,
+            "Extra top offset in landscape",
+            "popupLandscapeTopDp",
+            TuningStore.DEFAULT_POPUP_LANDSCAPE_TOP_DP,
+            null
+        )
+        captionView(
+            body,
+            "Height above is a ceiling: a one-line card gets a shorter popup so there is no empty " +
+                "card under it. The landscape offset pushes it clear of the bar's clock, which sits " +
+                "lower there."
+        )
     }
 
     private fun itemsCard() {
@@ -912,11 +935,15 @@ class SettingsActivity : AppCompatActivity() {
         }
         headers.addView(valueView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
-        val start = prefs.getInt(key, default).coerceIn(0, MAX_DP)
+        // -1 is the "auto" marker some of these keys use. It cannot go straight into the slider
+        // (values below valueFrom are rejected), so the label carries it and the thumb sits at 0
+        // until the slider is actually touched.
+        val stored = prefs.getInt(key, default)
+        val start = stored.coerceIn(0, MAX_DP)
         fun render(v: Int) {
             valueView.text = if (v < 0) "auto" else "$v dp"
         }
-        render(start)
+        render(if (stored < 0) -1 else start)
 
         val slider = Slider(this).apply {
             valueFrom = 0f

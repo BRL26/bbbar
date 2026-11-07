@@ -82,7 +82,8 @@ class TuningReceiver : BroadcastReceiver() {
         TuningStore.FEATURE_MEDIA,
         TuningStore.FEATURE_TIMERS,
         TuningStore.FEATURE_ALARM,
-        TuningStore.FEATURE_LIVE
+        TuningStore.FEATURE_LIVE,
+        TuningStore.AOD_GRAY
     )
 
     private fun intents(intent: Intent) =

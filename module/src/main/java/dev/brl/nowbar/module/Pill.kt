@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
@@ -13,6 +15,7 @@ import android.graphics.Shader
 import android.graphics.drawable.Drawable
 import android.graphics.Rect
 import android.graphics.RectF
+import android.animation.TimeInterpolator
 import android.animation.ValueAnimator
 import android.graphics.Typeface
 import android.text.TextPaint
@@ -22,6 +25,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import kotlin.math.abs
 
@@ -44,6 +48,9 @@ class PillView(context: Context) : View(context) {
 
         /** Scroll speed in dp per second. */
         private const val MARQUEE_SPEED_DP = 34f
+
+        /** Height of the expanded media seek row: the track plus the elapsed time beside it. */
+        private const val SEEK_ROW_DP = 14f
     }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -114,6 +121,23 @@ class PillView(context: Context) : View(context) {
     private var slidePx = 0f
     private var slideAnimator: ValueAnimator? = null
 
+    /** How far the card is dragged out of place while a finger is down (it follows the finger). */
+    private var dragX = 0f
+    private var dragY = 0f
+    private var dragging = false
+    private var dragAnimator: ValueAnimator? = null
+
+    /** The expanded media seek slider: its touch band, and the position being dragged to. */
+    private val seekTouch = RectF()
+    private var seekVisible = false
+    private var seeking = false
+    private var seekFraction = -1f
+
+    /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
+    private var gray = 0f
+    private var grayAnimator: ValueAnimator? = null
+    private val grayPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
     /**
      * A context carrying the app's Material 3 theme, wrapped with the wallpaper palette. A
      * service's own context often has no Material theme, which silently made every colour role
@@ -138,6 +162,9 @@ class PillView(context: Context) : View(context) {
 
     /** "prev" | "playpause" | "next" from the expanded media controls. */
     var onControl: ((String) -> Unit)? = null
+
+    /** Where the seek slider was released, as a 0..1 fraction of the track. */
+    var onSeek: ((Float) -> Unit)? = null
 
     /**
      * Fired when the user taps anywhere outside this window. Needs
@@ -187,6 +214,64 @@ class PillView(context: Context) : View(context) {
         } catch (t: Throwable) {
             Log.w("PillView.preferredWidth failed", t)
             maxWidthPx
+        }
+    }
+
+    /**
+     * How tall the card actually needs to be for the front item's content, capped at
+     * [maxHeightPx]. The expanded popup uses this so it hugs a single-line card instead of
+     * leaving a band of empty card under it, while a two-line media card keeps the room it needs.
+     */
+    fun preferredHeight(maxHeightPx: Int): Int {
+        return try {
+            if (maxHeightPx <= 0) return maxHeightPx
+            val item = frontItem ?: return maxHeightPx
+            val h = maxHeightPx.toFloat()
+            val r = minOf(if (radiusOverrideDp > 0f) dp(radiusOverrideDp) else h / 2f, h / 2f)
+            val pad = (dp(11f) + r * 0.12f).coerceAtMost(h / 3f)
+            val glyphSize = (h - pad * 2f).coerceAtMost(dp(34f)).coerceAtLeast(dp(14f))
+            val controlSize = glyphSize.coerceAtMost(dp(26f)).coerceAtLeast(dp(16f))
+            val subtitle = item.subtitle
+            val lines = titlePaint.textSize +
+                (if (expanded && subtitle.isNotBlank()) dp(1f) + subtitlePaint.textSize else 0f)
+            val seek = if (expanded && item.kind == ItemKind.MEDIA && item.durationMs > 0L) {
+                dp(SEEK_ROW_DP)
+            } else {
+                0f
+            }
+            val needed = maxOf(lines + seek, controlSize, glyphSize) + pad * 2f + dp(1f)
+            needed.toInt().coerceIn(dp(36f).toInt(), maxHeightPx)
+        } catch (t: Throwable) {
+            Log.w("PillView.preferredHeight failed", t)
+            maxHeightPx
+        }
+    }
+
+    /**
+     * Fades the whole card to greyscale. The always-on display asks for 1; waking fades it back
+     * quickly, so the pill never pops from grey to colour in one frame.
+     */
+    fun setGray(target: Float, durationMs: Long) {
+        try {
+            val to = target.coerceIn(0f, 1f)
+            grayAnimator?.cancel()
+            if (durationMs <= 0L || abs(to - gray) < 0.01f) {
+                gray = to
+                invalidate()
+                return
+            }
+            val anim = ValueAnimator.ofFloat(gray, to).apply {
+                duration = durationMs
+                interpolator = DecelerateInterpolator(1.2f)
+                addUpdateListener {
+                    gray = it.animatedValue as Float
+                    invalidate()
+                }
+            }
+            grayAnimator = anim
+            anim.start()
+        } catch (t: Throwable) {
+            Log.w("PillView.setGray failed", t)
         }
     }
 
@@ -329,6 +414,21 @@ class PillView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         marqueeActive = false
+        seekVisible = false
+        seekTouch.setEmpty()
+        // Greyscale is a layer filter over the finished card, so the artwork, the text and the
+        // controls all lose their colour together instead of each paint being rewritten.
+        var layer = -1
+        try {
+            if (gray > 0.004f) {
+                val matrix = ColorMatrix().apply { setSaturation(1f - gray) }
+                grayPaint.colorFilter = ColorMatrixColorFilter(matrix)
+                layer = canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), grayPaint)
+            }
+        } catch (t: Throwable) {
+            Log.w("PillView grey layer failed", t)
+            layer = -1
+        }
         canvas.save()
         try {
             val drawH = if (contentHeightPx > 0) contentHeightPx.toFloat() else height.toFloat()
@@ -336,6 +436,7 @@ class PillView(context: Context) : View(context) {
             // rather than re-laying out its contents, so nothing is squished.
             if (contentHeightPx > 0) canvas.translate(0f, (height - contentHeightPx).toFloat())
             if (slidePx != 0f) canvas.translate(0f, slidePx)
+            if (dragX != 0f || dragY != 0f) canvas.translate(dragX, dragY)
 
             val count = items.size.coerceAtLeast(1)
             val stacked = minOf(((count - 1) * peekPx).toFloat(), drawH * 0.45f)
@@ -389,6 +490,7 @@ class PillView(context: Context) : View(context) {
             Log.w("PillView.onDraw threw", t)
         } finally {
             canvas.restore()
+            if (layer >= 0) canvas.restoreToCount(layer)
             // Keep the frame clock running only while a line is actually scrolling.
             if (marqueeActive) postInvalidateOnAnimation()
         }
@@ -512,21 +614,29 @@ class PillView(context: Context) : View(context) {
         }
         val subtitle = if (item?.kind == ItemKind.TIMER) "" else item?.subtitle.orEmpty()
         val showSubtitle = expanded && subtitle.isNotBlank() && h >= dp(40f) && available >= dp(40f)
+        // A media card that knows its length gets a scrubber under the name, with the elapsed time
+        // beside it, instead of the thin progress strip along the bottom edge.
+        val showSeek = expanded && item?.kind == ItemKind.MEDIA && item.durationMs > 0L &&
+            h >= dp(46f) && available >= dp(70f)
 
+        val gap = dp(1f)
+        val seekRow = if (showSeek) dp(SEEK_ROW_DP) else 0f
+        val block = titlePaint.textSize +
+            (if (showSubtitle) gap + subtitlePaint.textSize else 0f) + seekRow
+        val top = ((contentBottom - block) / 2f).coerceAtLeast(dp(2f))
+        val titleBaseline = top - titlePaint.ascent()
+        paintEllipsized(canvas, title, titlePaint, textLeft, titleBaseline, available)
+        var lineBottom = titleBaseline + titlePaint.descent()
         if (showSubtitle) {
-            val gap = dp(1f)
-            val block = titlePaint.textSize + gap + subtitlePaint.textSize
-            val top = (contentBottom - block) / 2f
-            val titleBaseline = top - titlePaint.ascent()
-            val subBaseline = titleBaseline + titlePaint.descent() + gap + subtitlePaint.textSize
+            val subBaseline = lineBottom + gap + subtitlePaint.textSize
             paintEllipsized(canvas, subtitle, subtitlePaint, textLeft, subBaseline, available)
-            paintEllipsized(canvas, title, titlePaint, textLeft, titleBaseline, available)
-        } else {
-            val baseline = contentBottom / 2f - (titlePaint.descent() + titlePaint.ascent()) / 2f
-            paintEllipsized(canvas, title, titlePaint, textLeft, baseline, available)
+            lineBottom = subBaseline + subtitlePaint.descent()
+        }
+        if (showSeek && item != null) {
+            drawSeekRow(canvas, item, textLeft, lineBottom + dp(1f), available)
         }
 
-        if (showBar && item != null) {
+        if (showBar && !seekVisible && item != null) {
             val insetX = (r * 0.55f).coerceAtLeast(dp(14f))
             val trackW = w - insetX * 2f
             if (barTop > dp(2f) && trackW > barH * 2f) {
@@ -543,8 +653,59 @@ class PillView(context: Context) : View(context) {
         canvas.restore()
     }
 
-    private fun clipToCard(canvas: Canvas, area: RectF, radius: Float) {
-        artClip.reset()
+    /**
+     * The expanded media scrubber. Dragging it previews a position (the time label follows the
+     * thumb); releasing sends one seek through [onSeek]. The touch band is taller than the visible
+     * track so it can be grabbed one-handed.
+     */
+    private fun drawSeekRow(
+        canvas: Canvas,
+        item: NowBarItem,
+        left: Float,
+        bandTop: Float,
+        available: Float
+    ) {
+        try {
+            val duration = item.durationMs.coerceAtLeast(1L)
+            val fraction = if (seeking && seekFraction >= 0f) {
+                seekFraction
+            } else {
+                (item.positionMs.toFloat() / duration).coerceIn(0f, 1f)
+            }
+            val timeText = formatClock((duration * fraction).toLong())
+            val timeW = subtitlePaint.measureText(timeText)
+            val timeGap = dp(6f)
+            val trackW = (available - timeW - timeGap).coerceAtLeast(dp(24f))
+            val bandH = dp(SEEK_ROW_DP)
+            val cy = bandTop + bandH / 2f
+            val trackH = dp(3f)
+            val trackTop = cy - trackH / 2f
+
+            card.set(left, trackTop, left + trackW, trackTop + trackH)
+            canvas.drawRoundRect(card, trackH / 2f, trackH / 2f, progressTrack)
+            val filled = (trackW * fraction).coerceIn(0f, trackW)
+            if (filled > dp(1f)) {
+                card.set(left, trackTop, left + filled, trackTop + trackH)
+                canvas.drawRoundRect(card, trackH / 2f, trackH / 2f, progressFill)
+            }
+            canvas.drawCircle(left + filled, cy, dp(4f), progressFill)
+
+            val timeBaseline = cy - (subtitlePaint.descent() + subtitlePaint.ascent()) / 2f
+            canvas.drawText(timeText, left + trackW + timeGap, timeBaseline, subtitlePaint)
+
+            seekTouch.set(
+                left - dp(6f),
+                cy - dp(11f),
+                left + trackW + dp(6f),
+                cy + dp(11f)
+            )
+            seekVisible = true
+        } catch (t: Throwable) {
+            Log.w("PillView seek row failed", t)
+        }
+    }
+
+    private fun clipToCard(canvas: Canvas, area: RectF, radius: Float) {        artClip.reset()
         artClip.addRoundRect(area, radius, radius, Path.Direction.CW)
         canvas.save()
         canvas.clipPath(artClip)
@@ -971,26 +1132,84 @@ class PillView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         try {
             // An idle status bar pill (placeholder text or logo) is not a control: there is
-            // nothing to expand into, so it must not react to taps or swipes.
-            if (items.isEmpty() && event.action == MotionEvent.ACTION_UP) return true
-            val threshold = dp(30f)
+            // nothing to expand into and nothing to swipe to, so it neither reacts to a tap nor
+            // wobbles under the finger.
+            val idle = items.isEmpty()
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
                     downY = event.y
+                    dragging = false
+                    seeking = seekVisible && seekTouch.contains(event.x, event.y)
+                    if (seeking) {
+                        seekFraction = fractionAt(event.x)
+                        invalidate()
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (seeking) {
+                        seekFraction = fractionAt(event.x)
+                        invalidate()
+                        return true
+                    }
+                    if (idle) return true
+                    val dx = event.x - downX
+                    val dy = event.y - downY
+                    if (!dragging && (abs(dx) > dp(6f) || abs(dy) > dp(6f))) {
+                        dragAnimator?.cancel()
+                        dragging = true
+                    }
+                    if (dragging) {
+                        // The card follows the finger. Horizontal drags are damped, because the
+                        // swipe they commit to is a skip rather than a card change.
+                        if (abs(dx) >= abs(dy)) {
+                            dragX = dx * 0.7f
+                            dragY = 0f
+                        } else {
+                            dragX = 0f
+                            dragY = dy
+                        }
+                        invalidate()
+                    }
                     return true
                 }
                 MotionEvent.ACTION_UP -> {
-                    val dx = event.x - downX
-                    val dy = event.y - downY
-                    if (abs(dx) > threshold && abs(dx) > abs(dy)) {
-                        onSwipe?.invoke(if (dx > 0f) 1 else -1, 0)
+                    if (seeking) {
+                        val f = fractionAt(event.x)
+                        seeking = false
+                        seekFraction = -1f
+                        invalidate()
+                        onSeek?.invoke(f)
                         return true
                     }
-                    if (abs(dy) > threshold && abs(dy) > abs(dx)) {
-                        onSwipe?.invoke(0, if (dy > 0f) 1 else -1)
+                    if (dragging) {
+                        dragging = false
+                        val dx = event.x - downX
+                        val dy = event.y - downY
+                        // A short drag springs back untouched; a long one commits.
+                        val threshold = maxOf(dp(44f), height * 0.3f)
+                        if (abs(dx) >= abs(dy)) {
+                            if (abs(dx) >= threshold) {
+                                onSwipe?.invoke(if (dx > 0f) 1 else -1, 0)
+                                settleBack(240L)
+                            } else {
+                                springHome()
+                            }
+                        } else {
+                            if (abs(dy) >= threshold) {
+                                // Hand the vertical offset over to animateSwap, which slides the
+                                // incoming card in from the side the finger left.
+                                dragY = 0f
+                                invalidate()
+                                onSwipe?.invoke(0, if (dy > 0f) 1 else -1)
+                            } else {
+                                springHome()
+                            }
+                        }
                         return true
                     }
+                    if (idle) return true
                     for (i in controlRects.indices) {
                         if (controlRects[i].contains(event.x, event.y)) {
                             onControl?.invoke(controlKeys[i])
@@ -1004,11 +1223,67 @@ class PillView(context: Context) : View(context) {
                     onOutsideTouch?.invoke()
                     return true
                 }
+                MotionEvent.ACTION_CANCEL -> {
+                    dragging = false
+                    seeking = false
+                    seekFraction = -1f
+                    springHome()
+                    return true
+                }
             }
         } catch (t: Throwable) {
             Log.w("PillView.onTouchEvent threw", t)
         }
         return true
+    }
+
+    /** Where a touch falls on the seek track, as a 0..1 fraction. */
+    private fun fractionAt(x: Float): Float {
+        val left = seekTouch.left + dp(6f)
+        val width = (seekTouch.width() - dp(12f)).coerceAtLeast(1f)
+        return ((x - left) / width).coerceIn(0f, 1f)
+    }
+
+    /** Too short to commit: the card bounces back to its place with a little overshoot. */
+    private fun springHome() {
+        animateDragTo(0f, 0f, 280L, OvershootInterpolator(1.7f))
+    }
+
+    /** Committed: the card eases home while the new card or track lands. */
+    private fun settleBack(durationMs: Long) {
+        animateDragTo(0f, 0f, durationMs, DecelerateInterpolator(1.5f))
+    }
+
+    private fun animateDragTo(toX: Float, toY: Float, durationMs: Long, curve: TimeInterpolator) {
+        try {
+            dragAnimator?.cancel()
+            if (dragX == toX && dragY == toY) return
+            val fromX = dragX
+            val fromY = dragY
+            val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = durationMs
+                interpolator = curve
+                addUpdateListener {
+                    val f = it.animatedValue as Float
+                    dragX = fromX + (toX - fromX) * f
+                    dragY = fromY + (toY - fromY) * f
+                    invalidate()
+                }
+            }
+            anim.addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (dragAnimator === animation) {
+                        dragX = toX
+                        dragY = toY
+                        invalidate()
+                    }
+                }
+            })
+            dragAnimator = anim
+            anim.start()
+        } catch (t: Throwable) {
+            Log.w("PillView drag settle failed", t)
+        }
     }
 
     private fun dp(v: Float): Float = v * resources.displayMetrics.density

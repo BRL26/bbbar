@@ -22,6 +22,15 @@ The accessibility overlay is the real path: it wins on the lock screen without r
 `Window #2`, above `NotificationShade`). `TYPE_APPLICATION_OVERLAY` is layered *below* the
 keyguard by platform rule, which is why the fallback overlay only ever shows over apps.
 
+## Following the status bar
+
+The pill is drawn in the same strip as the notification icons, so it follows the bar's own
+visibility: when a fullscreen or immersive app hides the status bar, the pill leaves with it and
+comes back when the bar returns. The state comes from the SystemUI hook, which samples the status
+bar view's own `isShown` every 400 ms and publishes it to `Settings.Global → bbbar_sb_hidden` only
+when it changes. A stale hook (SystemUI restarted without it) is ignored, so a leftover flag can
+never switch the pill off for good — without the hook the pill simply stays visible.
+
 ## Android's own status bar icons
 
 The pill lives in the strip Android fills with notification icons, so bbbar can hide that strip's
@@ -142,8 +151,26 @@ Swiping is part of the surface:
 | --- | --- | --- |
 | Tap | collapsed pill | expand |
 | Tap outside | expanded pill / popup | collapse (animated) |
-| Swipe left / right | expanded or lockscreen card, media in front | previous / next track |
+| Swipe right | expanded or lockscreen card, media in front | previous track |
+| Swipe left | expanded or lockscreen card, media in front | next track |
 | Swipe up / down | expanded or lockscreen card | cycle the stack; the new front card is also what the status bar pill shows |
+| Drag the scrubber | expanded media card | preview a position, seek on release |
+
+The card follows the finger while a drag is in progress, and springs back with a small overshoot
+when it is released short of the distance a swipe needs (44 dp, or 30 % of the card height). Media
+drags go right for *previous*, matching the rest of the system.
+
+An expanded card settles back to the pill on its own after **10 s**. Any control, swipe or seek
+re-arms that timer, so it never closes while it is being used; the collapsed pill keeps showing
+the same activity.
+
+Expanded media cards carry a real scrubber under the title, with the elapsed time beside it,
+instead of the thin progress strip along the bottom edge (that strip stays for timers, charging and
+live updates, which have no seekable position).
+
+The expanded popup is **as tall as its content** (`popupHeightDp` is a ceiling): a one-line card
+gets a short island instead of a band of empty card under it. Its height animates when a different
+card needs more or less room.
 
 Long lines scroll instead of being cut: a 1.4 s hold, a steady 34 dp/s slide, a 1.1 s hold, then
 loop, with the cut ends faded into the card (`scrollText` turns it off). A track change restarts the
@@ -165,6 +192,8 @@ live.
 - **Surfaces** — one card each for the lockscreen pill, the status bar pill and the expanded popup,
   each with its own on/off switch, a live scaled preview, a `width × height` caption and the dp
   sliders. Sliders run `0…1000 dp` so nothing is capped; `-1` on a left/top value means *auto*.
+  The lockscreen card also has **Greyscale on the always-on display**, and the popup card an
+  **Extra top offset in landscape** that pushes it clear of the bar's clock.
 - **Content** — the item switches (media, timers, live updates), the **ranking** list with ▲/▼
   buttons, notification access state and a link to grant it, and the placeholder label.
 - **Maintenance** — open the floating tuner (draggable panel, same prefs), reset to defaults.

@@ -46,6 +46,12 @@ object TuningStore {
     const val SCROLL_TEXT = "scrollText"
 
     /**
+     * The always-on display is a still, colourless screen: the pill fades to greyscale with it and
+     * fades back to colour on wake. Off keeps it in colour on the AOD.
+     */
+    const val AOD_GRAY = "aodGray"
+
+    /**
      * What an idle status bar pill says: the label, as typed. A blank label means there is nothing
      * to say, so no pill is drawn until an activity starts.
      *
@@ -144,6 +150,12 @@ object TuningStore {
     const val DEFAULT_POPUP_RADIUS_DP = 32
     const val DEFAULT_POPUP_LEFT_DP = -1
     const val DEFAULT_POPUP_TOP_DP = -1
+
+    /**
+     * Extra top offset in landscape, where the status bar is shallower and its clock sits closer
+     * to the edge, so the popup would otherwise clip into it.
+     */
+    const val DEFAULT_POPUP_LANDSCAPE_TOP_DP = 24
 
     fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

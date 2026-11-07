@@ -51,4 +51,18 @@ object MediaActions {
             Log.w("media previous failed", t)
         }
     }
+
+    /**
+     * Jumps the player to [positionMs]. Used by the expanded card's seek slider: dragging it only
+     * previews the position, the seek lands when the finger lifts.
+     */
+    fun seek(context: Context, token: MediaSession.Token?, positionMs: Long) {
+        try {
+            val c = controller(context, token) ?: return
+            c.transportControls.seekTo(positionMs.coerceAtLeast(0L))
+            Log.i("media: seek to ${positionMs}ms")
+        } catch (t: Throwable) {
+            Log.w("media seek failed", t)
+        }
+    }
 }

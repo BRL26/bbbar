@@ -33,6 +33,7 @@ object Tuning {
         val radiusDp: Int = TuningStore.DEFAULT_POPUP_RADIUS_DP,
         val leftDp: Int = TuningStore.DEFAULT_POPUP_LEFT_DP,
         val topDp: Int = TuningStore.DEFAULT_POPUP_TOP_DP,
+        val landscapeTopDp: Int = TuningStore.DEFAULT_POPUP_LANDSCAPE_TOP_DP,
         val label: String = TuningStore.DEFAULT_LABEL
     )
 
@@ -45,6 +46,10 @@ object Tuning {
             radiusDp = p.getInt("popupRadiusDp", TuningStore.DEFAULT_POPUP_RADIUS_DP),
             leftDp = p.getInt("popupLeftDp", TuningStore.DEFAULT_POPUP_LEFT_DP),
             topDp = p.getInt("popupTopDp", TuningStore.DEFAULT_POPUP_TOP_DP),
+            landscapeTopDp = p.getInt(
+                "popupLandscapeTopDp",
+                TuningStore.DEFAULT_POPUP_LANDSCAPE_TOP_DP
+            ),
             label = p.getString("popupLabel", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
         )
     }

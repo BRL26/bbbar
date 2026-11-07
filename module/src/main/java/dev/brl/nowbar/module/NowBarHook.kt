@@ -56,6 +56,16 @@ class NowBarHook : IXposedHookLoadPackage {
         const val KEY_HOOK_BEAT = "bbbar_hook_beat"
         private const val BEAT_MS = 30_000L
 
+        /**
+         * 1 while SystemUI has the status bar hidden - a fullscreen or immersive app. bbbar's pill
+         * is drawn in that same strip, so the service hides it with the bar and brings it back
+         * when the bar returns.
+         */
+        const val KEY_SB_HIDDEN = "bbbar_sb_hidden"
+
+        /** How often the bar's own visibility is sampled. Cheap: one isShown() walk. */
+        private const val VIS_VISIT_MS = 400L
+
         /** Verified on Nothing OS 5.0: res/layout/status_bar.xml, id 0x7f0b0718. */
         private const val ID_NAME_ICON_AREA = "notification_icon_area"
     }
@@ -70,28 +80,51 @@ class NowBarHook : IXposedHookLoadPackage {
     private var beating = false
 
     /**
-     * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
-     * WRITE_SECURE_SETTINGS on this build, so no extra permission or root is involved.
+     * Publishes "the hook is running" into Settings.Global and keeps it fresh, and samples whether
+     * the status bar is actually visible. SystemUI holds WRITE_SECURE_SETTINGS on this build, so no
+     * extra permission or root is involved.
+     *
+     * Both writes happen on the same tick, but a write only lands when the value changes, so a
+     * steady bar costs one isShown() walk every [VIS_VISIT_MS] and no provider traffic.
      */
-    private fun startHeartbeat(context: Context) {
+    private fun startHeartbeat(context: Context, statusBar: View) {
         if (beating) return
         beating = true
         try {
             val main = Handler(Looper.getMainLooper())
+            var lastBeat = 0L
+            var lastHidden: Boolean? = null
             val tick = object : Runnable {
                 override fun run() {
+                    val now = android.os.SystemClock.elapsedRealtime()
                     try {
-                        Settings.Global.putLong(
-                            context.contentResolver,
-                            KEY_HOOK_BEAT,
-                            android.os.SystemClock.elapsedRealtime()
-                        )
+                        if (now - lastBeat >= BEAT_MS) {
+                            lastBeat = now
+                            Settings.Global.putLong(context.contentResolver, KEY_HOOK_BEAT, now)
+                        }
                     } catch (t: Throwable) {
                         Log.w("hook: heartbeat write failed", t)
                     }
-                    main.postDelayed(this, BEAT_MS)
+                    try {
+                        // isShown() is false when the bar or any of its parents is gone, which is
+                        // exactly what SystemUI does for an immersive app.
+                        val hidden = !statusBar.isShown
+                        if (hidden != lastHidden) {
+                            lastHidden = hidden
+                            Settings.Global.putInt(
+                                context.contentResolver,
+                                KEY_SB_HIDDEN,
+                                if (hidden) 1 else 0
+                            )
+                            Log.i("hook: status bar ${if (hidden) "hidden" else "visible"}")
+                        }
+                    } catch (t: Throwable) {
+                        Log.w("hook: visibility write failed", t)
+                    }
+                    main.postDelayed(this, VIS_VISIT_MS)
                 }
             }
+            // Sample once immediately, so a restart into a fullscreen app is not a stale read.
             main.post(tick)
         } catch (t: Throwable) {
             beating = false
@@ -142,7 +175,7 @@ class NowBarHook : IXposedHookLoadPackage {
             val context = statusBar.context ?: return
             // Before the icon-area search on purpose: the hook is loaded either way, and the row
             // should say so even if the strip could not be identified on a changed build.
-            startHeartbeat(context)
+            startHeartbeat(context, statusBar)
             val area = findIconArea(statusBar)
             if (area == null) {
                 Log.w("hook: notification icon area not found, icons left alone")

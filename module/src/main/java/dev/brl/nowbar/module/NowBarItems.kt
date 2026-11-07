@@ -38,7 +38,13 @@ data class NowBarItem(
     val packageName: String? = null,
     val control: Control? = null,
     /** Buttons the expanded card offers: the source app's own notification actions. */
-    val actions: List<Action> = emptyList()
+    val actions: List<Action> = emptyList(),
+    /**
+     * Playback position and length in ms, so an expanded media card can draw a real seek slider
+     * with the elapsed time beside it. Both are 0 when the player does not report a duration.
+     */
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L
 ) {
     data class Control(val pendingIntent: PendingIntent, val label: String)
 
@@ -241,7 +247,9 @@ object NowBarState {
             val playing = state?.state == PlaybackState.STATE_PLAYING
             item.copy(
                 progress = if (duration > 0L) (position.toFloat() / duration) else -1f,
-                playing = playing
+                playing = playing,
+                positionMs = position,
+                durationMs = duration
             )
         } catch (t: Throwable) {
             item
@@ -417,7 +425,9 @@ class NowBarNotifications : NotificationListenerService() {
             art = art,
             playing = playing,
             token = token,
-            packageName = sbn.packageName
+            packageName = sbn.packageName,
+            positionMs = position,
+            durationMs = duration
         )
     }
 

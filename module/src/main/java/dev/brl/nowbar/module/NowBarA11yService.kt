@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.Choreographer
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -24,10 +25,10 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.view.animation.PathInterpolator
+import kotlin.math.abs
 
 /**
  * Draws the pill as accessibility overlays (TYPE_ACCESSIBILITY_OVERLAY).
@@ -52,6 +53,19 @@ class NowBarA11yService : AccessibilityService() {
 
         /** Distance the popup sits below the status bar when its top is set to auto. */
         const val POPUP_GAP_DP = 8
+
+        /**
+         * How long an expanded form stays open on its own. After this it settles back to the pill;
+         * the collapsed card keeps showing the same activity.
+         */
+        const val AUTO_CLOSE_MS = 10_000L
+
+        /** AOD fades the pill to greyscale with the rest of the display; waking snaps it back. */
+        const val AOD_FADE_MS = 650L
+        const val WAKE_FADE_MS = 160L
+
+        /** A hook beat older than this means SystemUI restarted without the hook loaded. */
+        const val HOOK_STALE_MS = 180_000L
 
         const val SLIDE_MS = 180L
         const val EXPAND_MS = 280L
@@ -140,6 +154,13 @@ class NowBarA11yService : AccessibilityService() {
      * status bar pill shows.
      */
     private var frontKey: String? = null
+
+    /**
+     * True while SystemUI has the status bar hidden (a fullscreen or immersive app). The pill sits
+     * in that strip, so it has to leave with it instead of floating over the app on its own.
+     */
+    private var sbHidden = false
+    private var sbHiddenWarned = false
 
     private var sbPill: PillView? = null
     private var sbParams: WindowManager.LayoutParams? = null
@@ -231,6 +252,46 @@ class NowBarA11yService : AccessibilityService() {
         }
     }
 
+    /**
+     * Settles an expanded form back to the pill after [AUTO_CLOSE_MS]. Controls, swipes and a seek
+     * re-arm it, so it never closes while it is being used.
+     */
+    private val autoClose = object : Runnable {
+        override fun run() {
+            try {
+                when {
+                    popupPill != null -> {
+                        Log.i("auto close after ${AUTO_CLOSE_MS}ms: popup")
+                        collapseToSbPill()
+                    }
+                    lockExpanded -> {
+                        Log.i("auto close after ${AUTO_CLOSE_MS}ms: lock pill")
+                        toggleLockExpand()
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w("auto close failed", t)
+            }
+        }
+    }
+
+    private fun armAutoClose() {
+        try {
+            handler.removeCallbacks(autoClose)
+            handler.postDelayed(autoClose, AUTO_CLOSE_MS)
+        } catch (t: Throwable) {
+            Log.w("armAutoClose failed", t)
+        }
+    }
+
+    private fun disarmAutoClose() {
+        try {
+            handler.removeCallbacks(autoClose)
+        } catch (t: Throwable) {
+            Log.w("disarmAutoClose failed", t)
+        }
+    }
+
     /** Re-renders the visible pill once a second, so a timer counts down between updates. */
     private val timerTick = object : Runnable {
         override fun run() {
@@ -285,6 +346,9 @@ class NowBarA11yService : AccessibilityService() {
                         updateSurfaces()
                     }
                 }
+                // The pill shares its strip with the notification icons: when SystemUI hides the
+                // status bar for a fullscreen app, the pill leaves with it and comes back after.
+                if (!locked && isInteractive()) syncStatusBarVisibility()
                 val now = t
                 delay = when {
                     now < burstUntil -> BURST_POLL_MS
@@ -714,7 +778,11 @@ class NowBarA11yService : AccessibilityService() {
                         // Trusted unlock: the broadcast is only sent once the keyguard is gone.
                         Intent.ACTION_USER_PRESENT -> onUserPresent()
                         else -> {
-                            if (action == Intent.ACTION_SCREEN_ON) armBurst()
+                            if (action == Intent.ACTION_SCREEN_ON) {
+                                armBurst()
+                                // Off the AOD and back to a live screen: colour returns quickly.
+                                lockPill?.setGray(0f, WAKE_FADE_MS)
+                            }
                             updateSurfaces()
                         }
                     }
@@ -804,6 +872,11 @@ class NowBarA11yService : AccessibilityService() {
      */
     private fun onScreenOff() {
         lastScreenOffAt = SystemClock.uptimeMillis()
+        // The always-on display is a still, colourless screen, so the pill fades to greyscale with
+        // it and fades back on wake. Set before the early return: a phone that is already locked
+        // still dims, and this is the only notification of that.
+        disarmAutoClose()
+        if (TuningStore.isOn(this, TuningStore.AOD_GRAY)) lockPill?.setGray(1f, AOD_FADE_MS)
         // Already locked with nothing to swap: a second trigger must not add a second pill.
         if (lockPill != null && sbPill == null) return
         if (!handoverAllowed()) {
@@ -1124,6 +1197,7 @@ class NowBarA11yService : AccessibilityService() {
                 onTap = { if (lockExpanded) openCurrentApp(true) else toggleLockExpand() }
                 onSwipe = { dx, dy -> handleSwipe(true, dx, dy) }
                 onControl = { action -> handleControl(true, action) }
+                onSeek = { fraction -> seekFront(fraction) }
             }
             val w = dp(tuning.widthDp)
             val h = dp(tuning.heightDp)
@@ -1149,6 +1223,12 @@ class NowBarA11yService : AccessibilityService() {
             lockPill = view
             lockParams = lp
             lockExpanded = false
+            disarmAutoClose()
+            // A pill that appears while the display is off is part of the AOD, so it starts grey.
+            view.setGray(
+                if (!isInteractive() && TuningStore.isOn(this, TuningStore.AOD_GRAY)) 1f else 0f,
+                0L
+            )
             view.setStyle(tuning)
             if (slideIn) {
                 animateY(view, lp, lp.y, targetY, SLIDE_MS, DecelerateInterpolator(1.6f), null)
@@ -1169,6 +1249,7 @@ class NowBarA11yService : AccessibilityService() {
         lockAnimator?.cancel()
         lockAnimator = null
         lockExpanded = false
+        disarmAutoClose()
         val view = lockPill ?: return
         try {
             windowManager.removeView(view)
@@ -1234,26 +1315,25 @@ class NowBarA11yService : AccessibilityService() {
             val t = Tuning.current(this)
             val expanding = !lockExpanded
             lockExpanded = expanding
-            // Update the card's content without touching its size: applyContent() would resize the
-            // window to the expanded target immediately and there would be nothing left to animate.
-            view.setItems(
-                ordered(),
-                expanding,
-                dp(TuningStore.stackPeekDp(this))
-            )
+            val peek = dp(TuningStore.stackPeekDp(this))
+            // Content without touching the size: applyContent() would resize the window to the
+            // expanded target immediately and there would be nothing left to animate.
+            //
+            // Growing switches content now, so the card fills out as it grows. Shrinking does NOT:
+            // swapping the card back to one line at full size and then cropping it with a shrinking
+            // window is what made the collapse visibly jump. On the way down the expanded layout
+            // stays until the window has closed.
+            if (expanding) view.setItems(ordered(), true, peek)
             val target = lockTargetSize(t, expanding)
             lockAnimator?.cancel()
             val anim = ValueAnimator.ofFloat(0f, 1f).apply {
                 val fromW = lp.width
                 val fromH = lp.height
                 duration = EXPAND_MS
-                // No overshoot: the bounce at the end read as a stutter, and a plain ease-out
-                // lands on the final size without the last-frame jolt.
-                interpolator = if (expanding) {
-                    PathInterpolator(0.2f, 0f, 0f, 1f)
-                } else {
-                    AccelerateDecelerateInterpolator()
-                }
+                // No overshoot, and the same curve in both directions: the bounce at the end read
+                // as a stutter, and an ease-in-out collapse started by crawling for the first few
+                // frames, which is what made closing feel sluggish next to opening.
+                interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
                 var lastW = -1
                 var lastH = -1
                 addUpdateListener {
@@ -1286,10 +1366,13 @@ class NowBarA11yService : AccessibilityService() {
                         windowManager.updateViewLayout(view, lp)
                     } catch (t2: Throwable) {
                     }
+                    // Closed: now that the card is at its final size, one line replaces two.
+                    if (!expanding) view.setItems(ordered(), false, peek)
                 }
             })
             lockAnimator = anim
             anim.start()
+            if (expanding) armAutoClose() else disarmAutoClose()
             // Only a tap outside the expansion closes it; taps inside belong to the controls.
             view.onOutsideTouch = if (expanding) {
                 { if (lockExpanded) toggleLockExpand() }
@@ -1308,6 +1391,13 @@ class NowBarA11yService : AccessibilityService() {
     private fun addSbPill(slideIn: Boolean = false, fadeIn: Boolean = false) {
         try {
             if (sbPill != null) return
+            // Read fresh, not cached: during an unlock the cached value can still describe the
+            // AOD, where the bar is hidden, and that would swallow the handover.
+            sbHidden = readStatusBarHidden()
+            if (sbHidden) {
+                Log.i("sb pill skipped: the status bar is hidden")
+                return
+            }
             if (!enabled(TuningStore.SURFACE_STATUS)) return
             if (emptyForStatus()) return
             val t = Tuning.sb(this)
@@ -1476,10 +1566,14 @@ class NowBarA11yService : AccessibilityService() {
         return Rect4(sbPillX(), sbPillY(), dp(t.widthDp), dp(t.heightDp))
     }
 
-    private fun popupTargetRect(): Rect4 {
+    private fun popupTargetRect(view: PillView? = popupPill): Rect4 {
         val p = Tuning.popup(this)
         val w = dp(p.widthDp)
-        val h = dp(p.heightDp) + peekExtra()
+        val tuned = dp(p.heightDp)
+        // The tuned height is a ceiling, not a target: a one-line card with no scrubber gets a
+        // shorter popup instead of a band of empty card under it.
+        val front = view?.preferredHeight(tuned) ?: tuned
+        val h = front + peekExtra()
         // Portrait centres the popup. Landscape keeps it on the left, where the pill is, so the
         // expand/collapse animation grows out of the pill instead of flying across the screen.
         val landscape = screenWidthPx() > screenHeightPx()
@@ -1488,7 +1582,10 @@ class NowBarA11yService : AccessibilityService() {
             landscape -> dp(16)
             else -> ((screenWidthPx() - w) / 2).coerceAtLeast(0)
         }
-        val y = if (p.topDp >= 0) dp(p.topDp) else statusBarTopPx() + dp(POPUP_GAP_DP)
+        val baseY = if (p.topDp >= 0) dp(p.topDp) else statusBarTopPx() + dp(POPUP_GAP_DP)
+        // In landscape the bar's own clock sits closer to the top, and the inset above the app is
+        // shallower, so the popup is pushed down by an adjustable amount to clear it.
+        val y = if (landscape) baseY + dp(p.landscapeTopDp) else baseY
         return Rect4(x, y, w, h)
     }
 
@@ -1502,7 +1599,6 @@ class NowBarA11yService : AccessibilityService() {
             if (!enabled(TuningStore.SURFACE_POPUP)) return
             val pop = Tuning.popup(this)
             val start = pillRect()
-            val target = popupTargetRect()
 
             val view = PillView(this).apply {
                 setStyle(pop.label, pop.textDp, pop.radiusDp)
@@ -1515,9 +1611,12 @@ class NowBarA11yService : AccessibilityService() {
                 onTap = { openCurrentApp(false) }
                 onSwipe = { dx, dy -> handleSwipe(false, dx, dy) }
                 onControl = { action -> handleControl(false, action) }
+                onSeek = { fraction -> seekFront(fraction) }
                 // Taps inside the popup are for its controls; an outside tap closes it.
                 onOutsideTouch = { collapseToSbPill() }
             }
+            // Measured from the view itself, because the height now follows the card's content.
+            val target = popupTargetRect(view)
             val lp = WindowManager.LayoutParams(
                 start.w,
                 start.h,
@@ -1533,6 +1632,7 @@ class NowBarA11yService : AccessibilityService() {
             windowManager.addView(view, lp)
             popupPill = view
             popupParams = lp
+            armAutoClose()
             animatePopupRect(view, lp, start, target, OvershootInterpolator(1.08f), EXPAND_MS, onEnd = null)
             Log.i(
                 "popup expanding from pill ${start.w}x${start.h} at ${start.x},${start.y} " +
@@ -1546,6 +1646,7 @@ class NowBarA11yService : AccessibilityService() {
     private fun collapseToSbPill() {
         val view = popupPill ?: return
         val lp = popupParams ?: return
+        disarmAutoClose()
         try {
             val start = Rect4(lp.x, lp.y, lp.width, lp.height)
             val pill = pillRect()
@@ -1572,6 +1673,7 @@ class NowBarA11yService : AccessibilityService() {
     private fun removePopup() {
         popupAnimator?.cancel()
         popupAnimator = null
+        disarmAutoClose()
         val view = popupPill ?: return
         try {
             windowManager.removeView(view)
@@ -1693,6 +1795,48 @@ class NowBarA11yService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
 
+    /**
+     * Follows the status bar itself: the pill is drawn in the same strip as the notification
+     * icons, so a fullscreen app that hides the bar hides the pill too, and both come back
+     * together. The state comes from the SystemUI hook, which can see the bar's own visibility.
+     */
+    private fun syncStatusBarVisibility() {
+        try {
+            val hidden = readStatusBarHidden()
+            if (hidden == sbHidden) return
+            sbHidden = hidden
+            Log.i("status bar ${if (hidden) "hidden" else "visible"}: pill follows")
+            if (hidden) {
+                disarmAutoClose()
+                removePopup()
+                removeSbPill()
+            } else if (lastLocked == false) {
+                addSbPill(fadeIn = true)
+            }
+        } catch (t: Throwable) {
+            Log.w("status bar visibility sync failed", t)
+        }
+    }
+
+    /**
+     * Reads the hook's "status bar is hidden" flag. A stale hook (SystemUI restarted without it)
+     * is ignored, so a leftover 1 can never leave the pill switched off for good.
+     */
+    private fun readStatusBarHidden(): Boolean {
+        return try {
+            val beat = Settings.Global.getLong(contentResolver, NowBarHook.KEY_HOOK_BEAT, 0L)
+            val fresh = beat > 0L &&
+                abs(SystemClock.elapsedRealtime() - beat) < HOOK_STALE_MS
+            fresh && Settings.Global.getInt(contentResolver, NowBarHook.KEY_SB_HIDDEN, 0) == 1
+        } catch (t: Throwable) {
+            if (!sbHiddenWarned) {
+                sbHiddenWarned = true
+                Log.w("status bar state unreadable, assuming visible", t)
+            }
+            false
+        }
+    }
+
     private fun statusBarTopPx(): Int = try {
         windowManager.currentWindowMetrics.windowInsets
             .getInsetsIgnoringVisibility(WindowInsets.Type.statusBars())
@@ -1733,6 +1877,7 @@ class NowBarA11yService : AccessibilityService() {
     private fun applyAll() {
         // Before the master check: the watcher switch has to work with the pill switched off too.
         syncRootWatcher()
+        syncStatusBarVisibility()
         if (!TuningStore.isOn(this, TuningStore.MASTER)) {
             removeAllSurfaces()
             return
@@ -1801,7 +1946,10 @@ class NowBarA11yService : AccessibilityService() {
             val peek = dp(TuningStore.stackPeekDp(this))
 
             lockPill?.let { view ->
-                view.setItems(ordered(), lockExpanded, peek)
+                // The animator owns both the size and the moment the expanded layout flips back to
+                // one line. Re-filling the card mid-animation (this runs every second for a running
+                // timer) put the single-line layout inside a still-shrinking card - the stutter.
+                if (lockAnimator?.isRunning != true) view.setItems(ordered(), lockExpanded, peek)
                 // The item count decides the window height, so grow/shrink it when the stack
                 // changes - but never mid-expansion, where the animator owns the size.
                 val t = Tuning.current(this)
@@ -1831,19 +1979,22 @@ class NowBarA11yService : AccessibilityService() {
 
             popupPill?.let { view ->
                 view.setItems(ordered(), true, peek)
-                val target = popupTargetRect()
+                val target = popupTargetRect(view)
                 val lp = popupParams
                 if (lp != null && popupAnimator?.isRunning != true &&
                     (lp.height != target.h || lp.width != target.w)
                 ) {
-                    lp.width = target.w
-                    lp.height = target.h
-                    lp.y = target.y
-                    try {
-                        windowManager.updateViewLayout(view, lp)
-                    } catch (t2: Throwable) {
-                        Log.w("popup stack resize failed", t2)
-                    }
+                    // The next card needs a different height (two lines instead of one, or a
+                    // scrubber): flow into it rather than snapping.
+                    animatePopupRect(
+                        view,
+                        lp,
+                        Rect4(lp.x, lp.y, lp.width, lp.height),
+                        target,
+                        DecelerateInterpolator(1.6f),
+                        180L,
+                        onEnd = null
+                    )
                 }
             }
         } catch (t: Throwable) {
@@ -1912,10 +2063,13 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val items = itemsFor()
             val front = items.firstOrNull() ?: return
+            armAutoClose()
             if (dx != 0) {
                 if (front.kind != ItemKind.MEDIA) return
-                if (dx > 0) MediaActions.next(this, front.token)
-                else MediaActions.previous(this, front.token)
+                // Swiping right goes back, the same way the rest of the system reads a rightward
+                // drag on media. It used to skip forward, which felt reversed.
+                if (dx > 0) MediaActions.previous(this, front.token)
+                else MediaActions.next(this, front.token)
                 return
             }
             if (dy == 0 || items.size < 2) return
@@ -1932,8 +2086,23 @@ class NowBarA11yService : AccessibilityService() {
         }
     }
 
+    /** Seek slider released on an expanded media card: one seek, then the card stays open. */
+    private fun seekFront(fraction: Float) {
+        try {
+            armAutoClose()
+            val item = itemsFor().firstOrNull() ?: return
+            if (item.kind != ItemKind.MEDIA || item.durationMs <= 0L) return
+            val target = (item.durationMs * fraction.coerceIn(0f, 1f)).toLong()
+            MediaActions.seek(this, item.token, target)
+            Log.i("seek '${item.title}' to ${target}ms of ${item.durationMs}ms")
+        } catch (t: Throwable) {
+            Log.w("seek failed", t)
+        }
+    }
+
     private fun handleControl(lockSurface: Boolean, action: String) {
         try {
+            armAutoClose()
             val item = itemsFor().firstOrNull() ?: return
             // "action:n" is one of the source notification's own buttons: sending its
             // PendingIntent makes the app do the work, so the pill needs no permission.

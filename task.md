@@ -183,6 +183,41 @@ Enable / disable:
 - [x] The pill survives a SystemUI restart (`am crash com.android.systemui`) - one window before
       and after, because it is our own overlay
 
+### 1.0.2 — GitHub issues #1–#8 (verified on the device)
+- [x] **#3 media scrubber**: expanded media cards draw a seek slider under the title with the elapsed
+      time beside it (peeked while dragging, one seek on release through `MediaActions.seek`), and
+      the bottom progress strip is skipped for them. `NowBarItem` carries `positionMs`/`durationMs`,
+      filled from the session in `tickMedia` and when the card is built. Verified on the lockscreen:
+      slider + `0:32` label, drag previews, release seeks
+- [x] **#4 auto close**: `AUTO_CLOSE_MS` = 10 s, armed on expand (lock pill and popup), disarmed on
+      collapse/remove/screen-off, re-armed by any control, swipe or seek. Verified: tap → expanded,
+      log `auto close after 10000ms: lock pill` exactly 10 s later, card back to one line
+- [x] **#5 AOD greyscale**: `PillView.setGray` runs a `ColorMatrix` saturation layer over the whole
+      card; screen-off fades to 1 over 650 ms, `ACTION_SCREEN_ON` fades back over 160 ms. New switch
+      **Greyscale on the always-on display** (`aodGray`). Verified by flipping `aodGray` from adb and
+      comparing AOD screencaps: the same bar renders blue / grey
+- [x] **#6 swipe**: the card follows the finger (`dragX`/`dragY`), commits past `max(44 dp, 30 % h)`
+      and otherwise springs home with an `OvershootInterpolator` bounce (280 ms). Media direction is
+      now right = previous (it used to be the other way round). Verified in a 30 fps screen record:
+      the card rises with the finger, overshoots ~22 px past its place and settles; a leftward drag
+      logs `media: next`
+- [x] **#8 lockscreen collapse stutter**: two causes, both fixed — the content flipped to one line
+      at the *start* of the shrink, and `applyContent()` re-filled the card mid-animation (it runs
+      every second for a timer). The card now keeps its expanded layout while the window closes,
+      flips at `onAnimationEnd`, `applyContent` skips `setItems` while `lockAnimator` runs, and both
+      directions use one curve. Verified frame by frame: slider + controls stay through frames
+      94–100, single line from 102 (the last frame of the animation)
+- [x] **#2 compactification**: `PillView.preferredHeight()` measures what the front card needs and
+      the popup uses `min(tuned, needed)` — `popupHeightDp` is a ceiling now. A card switch animates
+      into its new height (180 ms) instead of snapping
+- [x] **#7 landscape**: new **Extra top offset in landscape** (`popupLandscapeTopDp`, 24 dp) applied
+      to the popup's y only in landscape, where the bar is shallower and its clock sits closer
+- [x] **#1 / #7 status bar parity**: the hook samples the status bar view's `isShown` every 400 ms and
+      writes `Settings.Global → bbbar_sb_hidden` on change; the service hides the pill and the popup
+      with the bar and re-adds them when it returns, with a stale-beat guard so a dead hook can never
+      switch the pill off. The old `-1`-as-*auto* slider values also display as *auto* again in the
+      settings screen (they used to be clamped to 0 and could not have been fed to the Slider)
+
 ## Next
 
 ### Pill content
@@ -252,5 +287,10 @@ torch, VPN, next calendar event.
   shows still comes from the accessibility overlay.
 - **The hook needs the module enabled for `com.android.systemui`** in LSPosed, and one SystemUI
   restart after installing a new build. `touch /data/local/tmp/bbbar_hook_off` disables it entirely.
+- **The 1.0.2 status-bar parity was not exercised on the device**: it lives in the hook, and the
+  hook only reloads with SystemUI. `adb shell su` is denied on this phone (Magisk allows apps, not
+  shell), so the restart could not be issued from here; the code path is compiled and fails safe
+  (`bbbar_sb_hidden` is only read while the hook heartbeat is fresh, otherwise the pill stays
+  visible). It needs one SystemUI restart from the settings screen to take effect.
 - **No root overlay daemon**: `app_process` is not registered with ActivityManager, so
   `WindowManager` refuses its window (`Unknown pid … uid=0`). Root is only the logcat wakeup.

@@ -210,6 +210,10 @@ Enable / disable:
 - [x] **#2 compactification**: `PillView.preferredHeight()` measures what the front card needs and
       the popup uses `min(tuned, needed)` — `popupHeightDp` is a ceiling now. A card switch animates
       into its new height (180 ms) instead of snapping
+- [x] **Same rule for the lockscreen expansion** (`lockCardSize`): width is still 2.5×, height is
+      `preferredHeight` clamped to `[collapsed, 2.5×]`, measured on the live view so it follows the
+      text size and the card in front. Verified: a media card expands to 1038×211px instead of
+      1038×447px, with title, artist, scrubber and controls all still inside
 - [x] **#7 landscape**: new **Extra top offset in landscape** (`popupLandscapeTopDp`, 24 dp) applied
       to the popup's y only in landscape, where the bar is shallower and its clock sits closer
 - [x] **#1 / #7 status bar parity**: the hook samples the status bar view's `isShown` every 400 ms and

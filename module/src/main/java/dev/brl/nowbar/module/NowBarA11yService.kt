@@ -1288,13 +1288,22 @@ class NowBarA11yService : AccessibilityService() {
         return Size(card.w, card.h + peekExtra())
     }
 
-    /** The front card on its own, which is what the tuned geometry describes. */
+    /**
+     * The front card on its own, which is what the tuned geometry describes.
+     *
+     * Expanded, the card is 2.5x the tuned size in width but only as tall as its content needs,
+     * with 2.5x as the ceiling and the collapsed height as the floor: the same rule the popup
+     * follows, so a card with one line of text does not grow into a mostly empty panel.
+     */
     private fun lockCardSize(t: Tuning.Values, expanded: Boolean): Size {
         val w = dp(t.widthDp)
         val h = dp(t.heightDp)
         if (!expanded) return Size(w, h)
         val maxW = (screenWidthPx() - dp(16)).coerceAtLeast(w)
-        return Size(minOf((w * SCALE).toInt(), maxW), (h * SCALE).toInt())
+        val ceiling = (h * SCALE).toInt()
+        // Measured on the live view, so it follows the text size and the card that is in front.
+        val needed = lockPill?.preferredHeight(ceiling) ?: ceiling
+        return Size(minOf((w * SCALE).toInt(), maxW), needed.coerceIn(h, ceiling))
     }
 
     private fun lockCardHeight(t: Tuning.Values, expanded: Boolean): Int =

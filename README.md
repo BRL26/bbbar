@@ -168,9 +168,10 @@ Expanded media cards carry a real scrubber under the title, with the elapsed tim
 instead of the thin progress strip along the bottom edge (that strip stays for timers, charging and
 live updates, which have no seekable position).
 
-The expanded popup is **as tall as its content** (`popupHeightDp` is a ceiling): a one-line card
-gets a short island instead of a band of empty card under it. Its height animates when a different
-card needs more or less room.
+Both expanded forms are **as tall as their content**: the expanded popup (`popupHeightDp` is a
+ceiling) and the expanded lockscreen card (2.5× the tuned height is a ceiling, the collapsed height
+is the floor). A one-line card gets a short island instead of a band of empty card under it, and the
+popup's height animates when a different card needs more or less room.
 
 Long lines scroll instead of being cut: a 1.4 s hold, a steady 34 dp/s slide, a 1.1 s hold, then
 loop, with the cut ends faded into the card (`scrollText` turns it off). A track change restarts the

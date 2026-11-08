@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.0.0** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.0.0)
+**v2.0.2** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.0.2)
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that
@@ -160,6 +160,11 @@ Only one collapsed surface is on screen at a time. Unlocking swaps the lock pill
 pill; locking reverses it, staged as `bar pill off → 450 ms → lock pill on` so the lock pill never
 lands inside the screen-off animation. Tapping a collapsed pill opens its expanded form; tapping
 anywhere outside closes it (taps inside no longer do).
+
+The status pill's window is **8 dp taller than the card at the top and the bottom**, with the card
+drawn inside it: a 27 dp bar is a small target for a thumb, and a tap that lands just above or
+below the shape belongs to the pill, not to the status bar underneath. The card itself is drawn at
+the tuned size and place — the padding is invisible and never moves the pill.
 
 Geometry comes from live window insets (`statusBars` top, `displayCutout`) and the tuned dp values
 below, never from hardcoded screen pixels. The status bar pill's width is fitted to its line

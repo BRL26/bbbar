@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.0.0, published** (`github.com/BRL26/bbbar`, tag `v2.0.0`). Base is settled: the accessibility
+**v2.0.2, published** (`github.com/BRL26/bbbar`, tag `v2.0.2`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -442,6 +442,9 @@ Enable / disable:
       whole glyph slot by luminance, so the play button inverts to black like any app icon
 - [x] SystemUI's icons are stopped at `draw` / `dispatchDraw`, not just alpha: SystemUI rewrote
       alpha and visibility during screen-off, which is the frame where they flashed through
+- [x] The strip pill's window is 8 dp taller than its card at both ends, so a tap just above or
+      below the shape still opens the expansion instead of hitting the status bar; the card keeps
+      its tuned size and place (`setFixedBox`)
 
 ### Hook fixes worth remembering
 - [x] **SystemUI crashed on every boot → LSPosed safe mode**: `hookAllMethods(cls, "draw")` also

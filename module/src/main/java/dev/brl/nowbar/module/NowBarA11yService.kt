@@ -111,6 +111,13 @@ class NowBarA11yService : AccessibilityService() {
          */
         const val SB_CLOCK_GAP_DP = 8
 
+        /**
+         * Invisible room above and below the status pill's card. The window is what receives the
+         * touch, so growing it by this much on either side turns a 27 dp bar into a target a
+         * thumb can actually hit without aiming at the pixel row.
+         */
+        private const val SB_TOUCH_PAD_DP = 8
+
         /** While the keyguard is showing and the screen is on, poll every frame-ish interval. */
         const val FAST_POLL_MS = 40L
 
@@ -1852,6 +1859,9 @@ class NowBarA11yService : AccessibilityService() {
             if (fadeIn) lp.alpha = 0f
             view.setStyle(t.label, t.textDp, t.radiusDp)
             view.setOutlineMode(TuningStore.outline(this))
+            // The card is drawn inside the padded window, so the visible pill keeps its tuned size
+            // while the window around it is the touch target.
+            view.setFixedBox(dp(t.heightDp), sbTouchPadPx())
             // The inverse glyphs are part of the measured width, so set them before fitting.
             view.setStatusOnly(lastLocked == true)
             view.setStatusGlyphs(
@@ -1865,7 +1875,8 @@ class NowBarA11yService : AccessibilityService() {
             // Content before the add, so the first frame is already the real item.
             view.setItems(NowBarState.items(this).take(1), false, 0)
             // A short line gets a short pill: the tuned width is the maximum, not a fixed size.
-            lp.width = view.preferredWidth(sbMaxWidthPx(), lp.height)
+            // Measured at the card's height, not the padded window's.
+            lp.width = view.preferredWidth(sbMaxWidthPx(), dp(t.heightDp))
             // The edge was worked out for the *tuned* width, and a right-anchored layout puts the
             // left edge where a pill that wide would start. Adding the narrower pill there left it
             // that many pixels short of its margin, and the next re-place snapped it back - the
@@ -1904,7 +1915,7 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val lp = sbParams ?: return
             // The shade and the status bar show the same pill: always fit the line.
-            val wanted = view.preferredWidth(sbMaxWidthPx(), lp.height)
+            val wanted = view.preferredWidth(sbMaxWidthPx(), dp(Tuning.sb(this).heightDp))
             if (lp.width == wanted && sbWidthAnimator?.isRunning != true) {
                 // The width is already right, but the position may still belong to a different
                 // one (a pill placed before its line was measured). Nothing would ever correct
@@ -2015,8 +2026,13 @@ class NowBarA11yService : AccessibilityService() {
         if (isLandscape() && t.topLandscapeDp >= 0) t.topLandscapeDp else t.topDp
 
     private fun placeSb(lp: WindowManager.LayoutParams, t: Tuning.Sb) {
+        val card = dp(t.heightDp)
+        // Window = card + an invisible strip above and below it, so the strip around the pill is
+        // ours too. The card is drawn at that top inset (setFixedBox), which is why the window
+        // starts that far above where the pill should sit.
+        val pad = sbTouchPadPx()
         lp.width = sbWidthPx(t)
-        lp.height = dp(t.heightDp)
+        lp.height = card + pad * 2
         Log.i(
             "placing sb pill: screen=${screenWidthPx()}x${screenHeightPx()} " +
                 "landscape=${isLandscape()} shade=${shadeOpen()}"
@@ -2024,7 +2040,7 @@ class NowBarA11yService : AccessibilityService() {
         // A value saved in another orientation (or from before a rotation) can land outside the
         // screen; that is how the pill vanished in landscape. Out-of-range values fall back to
         // the automatic place, which is itself clamped to the screen.
-        lp.y = sbYFor(t, lp.height)
+        lp.y = (sbYFor(t, card) - pad).coerceAtLeast(0)
         // Normal portrait layout: the tuned left edge or just past the clock. Inverse, and every
         // landscape layout, anchor the pill's right edge instead.
         lp.x = sbXFor(lp.width, t)
@@ -2200,7 +2216,12 @@ class NowBarA11yService : AccessibilityService() {
         return sbXFor(width, t).coerceIn(0, (screenWidthPx() - width).coerceAtLeast(0))
     }
 
-    private fun sbPillY(): Int = sbYFor(Tuning.sb(this), dp(Tuning.sb(this).heightDp))
+    /** Invisible room above and below the status pill's card, in pixels. */
+    private fun sbTouchPadPx(): Int = dp(SB_TOUCH_PAD_DP)
+
+    /** Top of the status pill's *window* (the card starts [sbTouchPadPx] below it). */
+    private fun sbPillY(): Int =
+        (sbYFor(Tuning.sb(this), dp(Tuning.sb(this).heightDp)) - sbTouchPadPx()).coerceAtLeast(0)
 
     /**
      * Top edge for the status pill, clamped to the screen. A tuned value saved in the other
@@ -2253,11 +2274,12 @@ class NowBarA11yService : AccessibilityService() {
         val lp = sbParams
         // The size on screen, not the tuned maximum: the pill shrinks to its line, and the
         // expansion has to start from the pill the owner actually sees.
+        // The card, not the padded window: the expansion has to start from the shape on screen.
         return Rect4(
             sbPillX(),
-            sbPillY(),
+            sbPillY() + sbTouchPadPx(),
             lp?.width ?: dp(t.widthDp),
-            lp?.height ?: dp(t.heightDp)
+            dp(t.heightDp)
         )
     }
 

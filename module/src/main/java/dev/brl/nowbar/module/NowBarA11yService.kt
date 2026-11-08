@@ -1413,7 +1413,10 @@ class NowBarA11yService : AccessibilityService() {
         // The status bar pill has no idle case to hide in: it stands in for Android's own battery
         // and signal icons, so it belongs on the strip whenever the phone is unlocked - with the
         // idle label as its text, or no text at all when that label is blank.
-        val wantSb = !locked && enabled(TuningStore.SURFACE_STATUS)
+        // Only the master switch can take it away: there is no per-surface switch, because the
+        // pill is what replaces Android's battery and signal icons. A stored `surfaceStatus=false`
+        // from an older build is ignored here on purpose.
+        val wantSb = !locked && TuningStore.isOn(this, TuningStore.MASTER)
         val haveLock = lockPill?.isAttachedToWindow == true
         val haveSb = sbPill?.isAttachedToWindow == true
 
@@ -1784,7 +1787,7 @@ class NowBarA11yService : AccessibilityService() {
                 Log.i("sb pill skipped: the status bar is hidden")
                 return
             }
-            if (!enabled(TuningStore.SURFACE_STATUS)) return
+            if (!TuningStore.isOn(this, TuningStore.MASTER)) return
             val t = Tuning.sb(this)
             val view = PillView(this).apply {
                 // The mini pill has no controls of its own: a tap is what opens the expansion.
@@ -2054,7 +2057,7 @@ class NowBarA11yService : AccessibilityService() {
             if (shadeOpen()) {
                 removeLockPill()
                 removePopup()
-                if (sbPill == null && enabled(TuningStore.SURFACE_STATUS)) addSbPill()
+                if (sbPill == null && TuningStore.isOn(this, TuningStore.MASTER)) addSbPill()
                 if (sbPill != null) {
                     setSbTouchable(false)
                     applySbTuning()
@@ -3084,7 +3087,7 @@ class NowBarA11yService : AccessibilityService() {
         } else if (lockPill == null && lastLocked == true) {
             addLockPill(fadeIn = true)
         }
-        if (!enabled(TuningStore.SURFACE_STATUS)) {
+        if (!TuningStore.isOn(this, TuningStore.MASTER)) {
             removeSbPill()
         } else if (sbPill == null && lastLocked == false) {
             addSbPill(fadeIn = true)
@@ -3151,7 +3154,7 @@ class NowBarA11yService : AccessibilityService() {
                 }
                 // The status pill stays on the strip for as long as the phone is unlocked: with
                 // nothing active it is the idle line, or just its own battery / signal glyphs.
-                val keepSb = enabled(TuningStore.SURFACE_STATUS) && lastLocked != true
+                val keepSb = TuningStore.isOn(this, TuningStore.MASTER) && lastLocked != true
                 if (!keepSb) removeSbPill() else sbPill?.let { view ->
                     view.setItems(emptyList(), false, 0)
                     // Back to the idle line: the pill has to shrink with it, otherwise it keeps

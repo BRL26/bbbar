@@ -15,6 +15,12 @@ object TuningStore {
     // Toggles. Everything defaults to on so a fresh install behaves like the dialled-in build.
     const val MASTER = "enabled"
     const val SURFACE_LOCK = "surfaceLock"
+
+    /**
+     * Legacy: the status pill has no on/off switch any more, because it replaces Android's battery
+     * and signal icons. The key is still written so a stored file stays complete; the service
+     * ignores it and follows the master switch.
+     */
     const val SURFACE_STATUS = "surfaceStatus"
     const val SURFACE_POPUP = "surfacePopup"
     const val FEATURE_MEDIA = "featureMedia"

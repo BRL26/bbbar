@@ -1463,8 +1463,11 @@ class PillView(context: Context) : View(context) {
         val subtitleAlpha = subtitlePaint.alpha
         titlePaint.alpha = (titleAlpha * textFade).toInt()
         subtitlePaint.alpha = (subtitleAlpha * textFade).toInt()
-        val block = titlePaint.textSize +
-            (if (showSubtitle) gap + subtitlePaint.textSize else 0f) + seekRow
+        // The block is the lines' real ink height (descent - ascent), not their text size: a line
+        // box is taller than the em size, so centring on `textSize` left the text a few pixels low.
+        val titleH = titlePaint.descent() - titlePaint.ascent()
+        val subtitleH = subtitlePaint.descent() - subtitlePaint.ascent()
+        val block = titleH + (if (showSubtitle) gap + subtitleH else 0f) + seekRow
         val top = ((contentBottom - block) / 2f).coerceAtLeast(dp(2f))
         val titleBaseline = top - titlePaint.ascent()
         // The dots punched through the AOD text are the *same* dots as the bar's progress, so they
@@ -1478,7 +1481,8 @@ class PillView(context: Context) : View(context) {
         }
         var lineBottom = titleBaseline + titlePaint.descent()
         if (showSubtitle) {
-            val subBaseline = lineBottom + gap + subtitlePaint.textSize
+            // Same as the title: the baseline sits `-ascent` below the second line's ink top.
+            val subBaseline = lineBottom + gap - subtitlePaint.ascent()
             if (lineStyle) {
                 paintAodText(
                     canvas,

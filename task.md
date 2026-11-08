@@ -43,9 +43,9 @@ Enable / disable:
       default 106 dp pill grew to fit `5:11 PM` beside the battery / Wi-Fi glyphs.
 - [x] **Defaults are the phone's own config**: left, no clock; 160 × 27 dp, radius 19, 20 dp from
       the edge; signal before battery; idle line `clockThenLabel`; placeholder `:)`.
-- [ ] **The clock-off layout has no strip pill on the keyguard** (the keyguard's own bar is left
-      alone). Implemented on every path that adds or keeps it; not verified on hardware yet, because
-      locking the phone needs the owner's PIN to get back in.
+- [x] **The clock-off layout has no strip pill on the keyguard** (the keyguard's own bar is left
+      alone). Verified on the lock screen: its own carrier label, clock widget and stock Wi-Fi /
+      battery icons, no strip pill, and the now-playing card still drawn at the bottom.
 - [x] **Settings labels fit**: the three placement buttons read **Right**, **Left**, **Left, no
       clock**; longer labels were ellipsized to `Left, after…` and `Left, cloc…` in the toggle row.
 

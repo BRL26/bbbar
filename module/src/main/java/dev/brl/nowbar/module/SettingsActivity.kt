@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.text.InputType
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.TypedValue
@@ -24,6 +25,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
+import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -385,13 +388,17 @@ class SettingsActivity : AppCompatActivity() {
     private fun homePage() {
         heroCard()
         homePreviewCard()
-        labelCard("Idle line", "What the pill says when nothing is active. A blank line hides it.")
+        labelCard(
+            "Idle line",
+            "What the pill says when nothing is active. A blank line leaves it without text."
+        )
     }
 
     private fun lookPage() {
         val quick = card("Surfaces", "Where the pill is allowed to appear")
         surfaceSwitch(quick, "Lockscreen", TuningStore.SURFACE_LOCK)
-        surfaceSwitch(quick, "Status bar", TuningStore.SURFACE_STATUS)
+        // The status bar pill has no switch: it is what replaces Android's battery and signal
+        // icons, so it belongs on the strip whenever the phone is unlocked.
         surfaceSwitch(quick, "Expanded card", TuningStore.SURFACE_POPUP)
         switchRow(
             quick,
@@ -752,9 +759,8 @@ class SettingsActivity : AppCompatActivity() {
     private fun statusBarPage() {
         val body = card(
             "Status bar pill",
-            "At the right end by default (inverse); off puts it over the notification icons"
+            "Always on the strip; at the right end unless inverse is off"
         )
-        surfaceSwitch(body, "Show in the status bar", TuningStore.SURFACE_STATUS)
         sbPreview = preview(body)
         sbCaption = caption(body)
         // Inverse (issue #10): a store change reaches the overlay; the global flag reaches the
@@ -763,8 +769,8 @@ class SettingsActivity : AppCompatActivity() {
             body,
             "Inverse: pill at the right end",
             "On by default. Hides Android's battery / network icons and the privacy dot, brings " +
-                "the notification icons back and draws the battery and signal in the pill. The " +
-                "expanded card grows leftwards.",
+                "the notification icons back and draws the battery and signal in the pill, with " +
+                "a hairline between them and the line. The expanded card is centred.",
             TuningStore.sbInverse(this)
         ) { on ->
             prefs.edit().putBoolean(TuningStore.SB_INVERSE, on).apply()
@@ -812,11 +818,20 @@ class SettingsActivity : AppCompatActivity() {
             )
         }
         sliderRow(body, "Top edge (-1 = centred)", "sbTopDp", TuningStore.DEFAULT_SB_TOP_DP, null)
+        // Landscape is right-anchored, so it takes a width of its own (a landscape strip is wide)
+        // and its own right margin, in place of the left edge the portrait layout uses.
         sliderRow(
             body,
-            "Landscape left edge (-1 = same as portrait)",
-            "sbLandscapeLeftDp",
-            TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP,
+            "Landscape width (-1 = portrait width)",
+            TuningStore.SB_LANDSCAPE_WIDTH,
+            TuningStore.DEFAULT_SB_LANDSCAPE_WIDTH_DP,
+            null
+        )
+        sliderRow(
+            body,
+            "Landscape right margin (-1 = portrait margin)",
+            TuningStore.SB_LANDSCAPE_RIGHT,
+            TuningStore.DEFAULT_SB_LANDSCAPE_RIGHT_DP,
             null
         )
         sliderRow(
@@ -828,10 +843,11 @@ class SettingsActivity : AppCompatActivity() {
         )
         captionView(
             body,
-            "Landscape is set separately because the bar is shallower there and its clock sits " +
-                "closer to the edge. Landscape is always centred. In portrait, inverse anchors the " +
-                "pill to the right and that margin is what moves it; with inverse off the left " +
-                "edge is used, where -1 means \"just past the clock\"."
+            "Landscape is set separately because the bar is shallower there and has far more room " +
+                "across. It is right-anchored like the inverse portrait layout, so the right margin " +
+                "is what moves it and -1 means \"use the portrait value\". In portrait, inverse " +
+                "anchors the pill to the right too; with inverse off the left edge is used, where " +
+                "-1 means \"just past the clock\"."
         )
     }
 
@@ -946,14 +962,14 @@ class SettingsActivity : AppCompatActivity() {
     private fun idlePage() {
         labelCard(
             "Idle line",
-            "Shown when nothing is active. Clear it to hide the idle status bar pill."
+            "Shown when nothing is active. Clear it to leave the pill with just its icons."
         )
         val body = card("Where it shows", "The idle line is not drawn everywhere")
         captionView(
             body,
             "The lockscreen pill and the expanded card simply disappear when nothing is active. " +
-                "The status bar pill keeps the idle line, and a blank line is what hides it - so " +
-                "there is no extra switch that can sit in the wrong state."
+                "The status bar pill never does: it stands in for Android's battery and signal " +
+                "icons, so a blank line just means it draws those without any text."
         )
     }
 
@@ -1528,7 +1544,8 @@ class SettingsActivity : AppCompatActivity() {
         )
         captionView(
             body,
-            "A blank line is not drawn at all: the pill stays away until an activity starts."
+            "A blank line is simply not drawn: the status pill keeps its battery and signal, " +
+                "with no text beside them."
         )
     }
 
@@ -1635,21 +1652,81 @@ class SettingsActivity : AppCompatActivity() {
             },
             LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
         )
-        val valueView = TextView(this).apply {
+        // A slider over 0…1000 dp cannot be landed on an exact number by hand, so the value is
+        // also a text field: type the measurement, press done, and the thumb follows it.
+        val valueBox = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val valueView = EditText(this).apply {
+            textSize = 14f
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            background = null
+            setPadding(0, 0, 0, 0)
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            minWidth = dp(44)
+            setSelectAllOnFocus(true)
+            contentDescription = "$title value in dp, or -1 for auto"
+        }
+        val unitView = TextView(this).apply {
+            text = "dp"
             textSize = 14f
             setTextColor(themeColor(com.google.android.material.R.attr.colorOnSurfaceVariant))
+            setPadding(dp(2), 0, 0, 0)
         }
-        headers.addView(valueView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        valueBox.addView(valueView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        valueBox.addView(unitView, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+        headers.addView(valueBox, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
 
         // -1 is the "auto" marker some of these keys use. It cannot go straight into the slider
-        // (values below valueFrom are rejected), so the label carries it and the thumb sits at 0
-        // until the slider is actually touched.
+        // (values below valueFrom are rejected), so the field carries it and the thumb sits at 0
+        // until the value is actually changed.
         val stored = prefs.getInt(key, default)
         val start = stored.coerceIn(range.first, range.last)
+
         fun render(v: Int) {
-            valueView.text = if (v < 0) "auto" else "$v dp"
+            // Never rewrite the text under a finger that is typing it.
+            if (valueView.hasFocus()) return
+            valueView.setText(if (v < 0) "auto" else v.toString())
+            unitView.visibility = if (v < 0) View.GONE else View.VISIBLE
         }
         render(if (stored < 0) -1 else start)
+
+        var sliderRef: Slider? = null
+
+        /** Applies what was typed: a number, -1, or "auto". Clamped to this slider's range. */
+        fun commitTyped() {
+            val raw = valueView.text?.toString()?.trim().orEmpty()
+            val parsed = when {
+                raw.isEmpty() -> if (stored < 0) -1 else start
+                raw.equals("auto", ignoreCase = true) -> -1
+                else -> raw.toIntOrNull()
+            }
+            if (parsed == null) {
+                render(stored)
+                return
+            }
+            val value = if (parsed < 0) -1 else parsed.coerceIn(range.first, range.last)
+            prefs.edit().putInt(key, value).apply()
+            // Setting the thumb does not run the fromUser path, so this cannot loop.
+            sliderRef?.value = value.coerceIn(range.first, range.last).toFloat()
+            render(value)
+            onChange?.invoke()
+        }
+
+        valueView.setOnFocusChangeListener { _, focused -> if (!focused) commitTyped() }
+        valueView.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                commitTyped()
+                valueView.clearFocus()
+                true
+            } else {
+                false
+            }
+        }
 
         val slider = Slider(this).apply {
             valueFrom = range.first.toFloat()
@@ -1665,6 +1742,7 @@ class SettingsActivity : AppCompatActivity() {
                 onChange?.invoke()
             }
         }
+        sliderRef = slider
 
         parent.addView(headers, rowParams())
         parent.addView(slider, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))

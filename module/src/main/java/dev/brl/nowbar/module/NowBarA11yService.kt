@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
 import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
@@ -30,7 +31,6 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import android.view.animation.PathInterpolator
 import kotlin.math.abs
 
@@ -230,6 +230,9 @@ class NowBarA11yService : AccessibilityService() {
     /** Battery percentage for the inverse pill's own glyph; -1 until the first sticky read. */
     private var batteryPct = -1
     private var batteryReceiver: BroadcastReceiver? = null
+
+    /** Instant heads-up when the phone joins or drops a network, so the glyph follows. */
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private var sbPill: PillView? = null
     private var sbParams: WindowManager.LayoutParams? = null
@@ -539,6 +542,7 @@ class NowBarA11yService : AccessibilityService() {
             handler.post(keyguardPoll)
             registerStatusBarObserver()
             registerBattery()
+            registerNetwork()
             registerDisplayListener()
             Log.i("accessibility overlay connected (locked=$lastLocked)")
         } catch (t: Throwable) {
@@ -755,6 +759,7 @@ class NowBarA11yService : AccessibilityService() {
             handler.removeCallbacks(watchdog)
             unregisterStatusBarObserver()
             unregisterBattery()
+            unregisterNetwork()
             unregisterDisplayListener()
         } catch (t: Throwable) {
         }
@@ -1405,9 +1410,10 @@ class NowBarA11yService : AccessibilityService() {
         val outline = TuningStore.outline(this)
         val wantLock = locked && !lockPillSuppressed &&
             enabled(TuningStore.SURFACE_LOCK) && (items.isNotEmpty() || outline)
-        // The status bar pill also stands in for the idle line, which only a blank label removes.
-        val wantSb = !locked && enabled(TuningStore.SURFACE_STATUS) &&
-            (items.isNotEmpty() || outline || TuningStore.showIdle(this))
+        // The status bar pill has no idle case to hide in: it stands in for Android's own battery
+        // and signal icons, so it belongs on the strip whenever the phone is unlocked - with the
+        // idle label as its text, or no text at all when that label is blank.
+        val wantSb = !locked && enabled(TuningStore.SURFACE_STATUS)
         val haveLock = lockPill?.isAttachedToWindow == true
         val haveSb = sbPill?.isAttachedToWindow == true
 
@@ -1779,7 +1785,6 @@ class NowBarA11yService : AccessibilityService() {
                 return
             }
             if (!enabled(TuningStore.SURFACE_STATUS)) return
-            if (emptyForStatus()) return
             val t = Tuning.sb(this)
             val view = PillView(this).apply {
                 // The mini pill has no controls of its own: a tap is what opens the expansion.
@@ -1816,7 +1821,13 @@ class NowBarA11yService : AccessibilityService() {
             view.setStyle(t.label, t.textDp, t.radiusDp)
             view.setOutlineMode(TuningStore.outline(this))
             // The inverse glyphs are part of the measured width, so set them before fitting.
-            view.setStatusGlyphs(t.inverse, batteryPct, cellLevel(), t.signalFirst)
+            view.setStatusGlyphs(
+                t.inverse,
+                batteryPct,
+                cellLevel(),
+                t.signalFirst,
+                Networks.kind(this)
+            )
             // Content before the add, so the first frame is already the real item.
             view.setItems(NowBarState.items(this).take(1), false, 0)
             // A short line gets a short pill: the tuned width is the maximum, not a fixed size.
@@ -1858,19 +1869,18 @@ class NowBarA11yService : AccessibilityService() {
             sbWidthAnimator?.cancel()
             val from = lp.width
             sbWidthTarget = wanted
-            Log.i("sb width morph: ${from}px -> ${wanted}px (max ${dp(Tuning.sb(this).widthDp)}px)")
+            Log.i("sb width morph: ${from}px -> ${wanted}px (max ${sbMaxWidthPx()}px)")
             val anim = ValueAnimator.ofInt(from, wanted).apply {
                 duration = WIDTH_MS
                 interpolator = DecelerateInterpolator(1.4f)
                 addUpdateListener {
                     if (sbPill !== view || sbParams !== lp) return@addUpdateListener
                     lp.width = it.animatedValue as Int
-                    // A centred pill stays centred while it morphs: width alone would make it
-                    // grow to the right in landscape. In the inverse layout the right edge is the
-                    // fixed one, so the left edge follows the new width.
+                    // Where the right edge is the fixed one (inverse, and landscape always) the
+                    // left edge has to follow the new width, or the pill grows to the right and
+                    // drifts away from the margin it was tuned to.
                     val ts = Tuning.sb(this@NowBarA11yService)
-                    if (isLandscape()) lp.x = centeredX(lp.width)
-                    else if (ts.inverse) lp.x = sbXFor(lp.width, ts)
+                    if (isLandscape() || ts.inverse) lp.x = sbXFor(lp.width, ts)
                     try {
                         windowManager.updateViewLayout(view, lp)
                     } catch (t: Throwable) {
@@ -1916,7 +1926,13 @@ class NowBarA11yService : AccessibilityService() {
             // Style first, so the width is measured from the new label and text size, not the old.
             view.setStyle(t.label, t.textDp, t.radiusDp)
             view.setOutlineMode(TuningStore.outline(this))
-            view.setStatusGlyphs(t.inverse, batteryPct, cellLevel(), t.signalFirst)
+            view.setStatusGlyphs(
+                t.inverse,
+                batteryPct,
+                cellLevel(),
+                t.signalFirst,
+                Networks.kind(this)
+            )
             val onScreen = lp.width
             placeSb(lp, t)
             // Position and height change at once, the width flows to its new value below. Keeping
@@ -1937,10 +1953,6 @@ class NowBarA11yService : AccessibilityService() {
 
     private fun isLandscape(): Boolean = screenWidthPx() > screenHeightPx()
 
-    /** Left edge in dp, preferring the landscape value when one is set. */
-    private fun sbLeftDp(t: Tuning.Sb): Int =
-        if (isLandscape() && t.leftLandscapeDp >= 0) t.leftLandscapeDp else t.leftDp
-
     private fun sbTopDp(t: Tuning.Sb): Int =
         if (isLandscape() && t.topLandscapeDp >= 0) t.topLandscapeDp else t.topDp
 
@@ -1955,50 +1967,46 @@ class NowBarA11yService : AccessibilityService() {
         // screen; that is how the pill vanished in landscape. Out-of-range values fall back to
         // the automatic place, which is itself clamped to the screen.
         lp.y = sbYFor(t, lp.height)
-        // Normal layout: the tuned left edge or just past the clock. Inverse: the pill ends at
-        // the right edge and grows leftwards. Landscape is centred in both layouts.
+        // Normal portrait layout: the tuned left edge or just past the clock. Inverse, and every
+        // landscape layout, anchor the pill's right edge instead.
         lp.x = sbXFor(lp.width, t)
         // Never off the screen, whatever the numbers say.
         lp.x = lp.x.coerceIn(0, (screenWidthPx() - lp.width).coerceAtLeast(0))
     }
 
-    /** Horizontal centre for a window [widthPx] wide. */
-    private fun centeredX(widthPx: Int): Int =
-        ((screenWidthPx() - widthPx) / 2).coerceAtLeast(0)
-
     /**
      * Where the status pill's left edge goes.
      *
-     * Normal layout: the tuned left edge, or clear of the clock. Inverse layout (issue #10): the
-     * pill occupies the right end of the strip, so its left edge follows from its width - which is
-     * also why the expanded card grows out of its left edge.
+     * Portrait, normal layout: the tuned left edge, or clear of the clock. Portrait inverse, and
+     * landscape in either layout: the pill occupies the right end of the strip (Android's battery /
+     * signal corner there too), so its left edge follows from its width and that orientation's
+     * right margin.
      */
     private fun sbXFor(widthPx: Int, t: Tuning.Sb): Int {
-        if (isLandscape()) return centeredX(widthPx)
-        if (t.inverse) return inverseSbX(widthPx)
-        val left = sbLeftDp(t)
+        if (isLandscape()) return rightAnchoredX(widthPx, sbRightMarginDp(t))
+        if (t.inverse) return rightAnchoredX(widthPx, t.rightMarginDp)
+        val left = t.leftDp
         return if (left >= 0) dp(left) else autoSbLeft(widthPx)
     }
 
-    /** Left edge that leaves the configured right margin between the pill and the screen edge. */
-    private fun inverseSbX(widthPx: Int): Int =
-        (screenWidthPx() - widthPx - dp(Tuning.sb(this).rightMarginDp)).coerceAtLeast(0)
+    /** Landscape's right margin: its own value, or the portrait one when unset. */
+    private fun sbRightMarginDp(t: Tuning.Sb): Int =
+        if (t.rightMarginLandscapeDp >= 0) t.rightMarginLandscapeDp else t.rightMarginDp
+
+    /** Left edge that leaves [marginDp] between the pill and the screen's right edge. */
+    private fun rightAnchoredX(widthPx: Int, marginDp: Int): Int =
+        (screenWidthPx() - widthPx - dp(marginDp)).coerceAtLeast(0)
 
     /**
-     * How wide the pill may grow. The tuned width is the cap in the status bar strip, where the icons
-     * need their room back; in landscape and with the shade open there is a whole screen to spend, so
-     * a long line gets a long pill instead of being squeezed into a status-bar-sized box.
+     * How wide the pill may grow: the tuned width for this orientation. Landscape has its own width
+     * (falling back to the portrait one), which is how it can take up a whole landscape strip
+     * instead of being held to a status-bar-sized box.
      */
-    private fun sbMaxWidthPx(): Int {
-        val t = Tuning.sb(this)
-        val tuned = dp(t.widthDp)
-        // The shade / Quick Settings shows the same pill in the same place as the status bar, so
-        // there is no separate width for it any more.
-        return if (isLandscape()) maxOf(tuned, screenWidthPx() / 3) else tuned
-    }
+    private fun sbMaxWidthPx(): Int = sbWidthPx(Tuning.sb(this))
 
-    /** The width the pill is laid out at: the tuned status-bar width, nothing shade-specific. */
-    private fun sbWidthPx(t: Tuning.Sb): Int = dp(t.widthDp)
+    /** The width the pill is laid out at: portrait width, or the landscape override. */
+    private fun sbWidthPx(t: Tuning.Sb): Int =
+        if (isLandscape() && t.widthLandscapeDp >= 0) dp(t.widthLandscapeDp) else dp(t.widthDp)
 
     /**
      * The clock's right edge as the hook saw it, 0 when there is no clock on screen. The pill is
@@ -2046,9 +2054,7 @@ class NowBarA11yService : AccessibilityService() {
             if (shadeOpen()) {
                 removeLockPill()
                 removePopup()
-                if (sbPill == null && enabled(TuningStore.SURFACE_STATUS) && !emptyForStatus()) {
-                    addSbPill()
-                }
+                if (sbPill == null && enabled(TuningStore.SURFACE_STATUS)) addSbPill()
                 if (sbPill != null) {
                     setSbTouchable(false)
                     applySbTuning()
@@ -2198,20 +2204,14 @@ class NowBarA11yService : AccessibilityService() {
         // shorter popup instead of a band of empty card under it.
         val front = view?.preferredHeight(tuned) ?: tuned
         val h = front + peekExtra()
-        // Both orientations centre the popup, and landscape centres the pill too, so the
-        // expand/collapse animation grows straight out of the pill instead of flying across the
-        // screen. A left margin here was what left the expanded card in the corner while the pill
-        // it grew from sat in the middle.
+        // The card is centred in both layouts, whatever the pill is doing (left, right or
+        // landscape): an expanded card that hung off one edge read as a panel stuck to the pill
+        // rather than the pill having opened up. Only an explicit left edge overrides this.
         val landscape = screenWidthPx() > screenHeightPx()
-        val inverse = Tuning.sb(this).inverse
-        val pill = pillRect()
-        val x = when {
-            p.leftDp >= 0 -> dp(p.leftDp)
-            // Inverse (issue #10): the card grows out of the pill's left edge, because the pill
-            // is anchored to the right edge of the screen and has no room to grow rightwards.
-            inverse && !landscape ->
-                (pill.x + pill.w - w).coerceIn(0, (screenWidthPx() - w).coerceAtLeast(0))
-            else -> ((screenWidthPx() - w) / 2).coerceAtLeast(0)
+        val x = if (p.leftDp >= 0) {
+            dp(p.leftDp).coerceIn(0, (screenWidthPx() - w).coerceAtLeast(0))
+        } else {
+            ((screenWidthPx() - w) / 2).coerceAtLeast(0)
         }
         val baseY = if (p.topDp >= 0) dp(p.topDp) else statusBarTopPx() + dp(POPUP_GAP_DP)
         // In landscape the bar's own clock sits closer to the top, and the inset above the app is
@@ -2269,7 +2269,20 @@ class NowBarA11yService : AccessibilityService() {
             popupPill = view
             popupParams = lp
             armAutoClose()
-            animatePopupRect(view, lp, start, target, OvershootInterpolator(1.08f), EXPAND_MS, onEnd = null)
+            // Material's emphasised decelerate, with a light fade-up: the old overshoot bounced the
+            // window past its own size and snapped back, which read as two separate motions.
+            lp.alpha = 0.7f
+            animatePopupRect(
+                view,
+                lp,
+                start,
+                target,
+                PathInterpolator(0.2f, 0f, 0f, 1f),
+                EXPAND_MS,
+                fadeTo = 1f,
+                fadeFrom = 0.7f,
+                onEnd = null
+            )
             Log.i(
                 "popup expanding from pill ${start.w}x${start.h} at ${start.x},${start.y} " +
                     "to ${target.w}x${target.h} at ${target.x},${target.y}"
@@ -2353,6 +2366,7 @@ class NowBarA11yService : AccessibilityService() {
         interpolator: TimeInterpolator,
         durationMs: Long,
         fadeTo: Float? = null,
+        fadeFrom: Float? = null,
         onEnd: (() -> Unit)?
     ) {
         popupAnimator?.cancel()
@@ -2366,8 +2380,12 @@ class NowBarA11yService : AccessibilityService() {
                 lp.width = (from.w + (to.w - from.w) * f).toInt()
                 lp.height = (from.h + (to.h - from.h) * f).toInt()
                 // Fading while it falls into the pill hides the last, smallest frames where the
-                // clipped card would still show a sliver of itself.
-                if (fadeTo != null) lp.alpha = 1f - f * (1f - fadeTo)
+                // clipped card would still show a sliver of itself. Expanding fades up from
+                // [fadeFrom] instead, so the card arrives rather than being stretched into place.
+                if (fadeTo != null) {
+                    val from = fadeFrom ?: 1f
+                    lp.alpha = from + f * (fadeTo - from)
+                }
                 try {
                     windowManager.updateViewLayout(view, lp)
                 } catch (t: Throwable) {
@@ -2804,6 +2822,48 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     /**
+     * Re-reads the connection when it changes: joining Wi-Fi has to swap the pill's bars for the
+     * Wi-Fi fan at once, not on the next content change that happens to come along.
+     */
+    private fun registerNetwork() {
+        if (networkCallback != null) return
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    updateStatusGlyphs()
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    updateStatusGlyphs()
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: android.net.Network,
+                    capabilities: android.net.NetworkCapabilities
+                ) {
+                    updateStatusGlyphs()
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+            Log.i("watching the connection for the pill glyphs")
+        } catch (t: Throwable) {
+            Log.w("network callback not registered", t)
+        }
+    }
+
+    private fun unregisterNetwork() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb)
+        } catch (t: Throwable) {
+            Log.w("network callback not removed", t)
+        }
+    }
+
+    /**
      * The inverse pill draws the battery Android's icon used to. The sticky battery broadcast is
      * the same number that icon reads, so no permission or hook is involved.
      */
@@ -2849,7 +2909,13 @@ class NowBarA11yService : AccessibilityService() {
     private fun updateStatusGlyphs() {
         try {
             val t = Tuning.sb(this)
-            sbPill?.setStatusGlyphs(t.inverse, batteryPct, cellLevel(), t.signalFirst)
+            sbPill?.setStatusGlyphs(
+                t.inverse,
+                batteryPct,
+                cellLevel(),
+                t.signalFirst,
+                Networks.kind(this)
+            )
         } catch (t: Throwable) {
             Log.w("status glyph update failed", t)
         }
@@ -3061,14 +3127,6 @@ class NowBarA11yService : AccessibilityService() {
     private fun emptyForLock(): Boolean =
         NowBarState.items(this).isEmpty() && !TuningStore.outline(this)
 
-    /**
-     * Only the status bar pill has an idle case, and it is the label itself: an idle pill with a
-     * blank label is not drawn. The lock pill and the popup are never placeholder surfaces.
-     */
-    private fun emptyForStatus(): Boolean =
-        NowBarState.items(this).isEmpty() && !TuningStore.outline(this) &&
-            (!TuningStore.showIdle(this) || !unlockedOnce)
-
     /** Pushes the current item into whichever pills exist; each surface decides what it shows. */
     private fun applyContent() {
         // addLockPill/addSbPill call back into here once the window exists, so the outer call has
@@ -3091,8 +3149,9 @@ class NowBarA11yService : AccessibilityService() {
                     removeLockPill()
                     removePopup()
                 }
-                val keepSb = TuningStore.outline(this) ||
-                    (TuningStore.showIdle(this) && unlockedOnce)
+                // The status pill stays on the strip for as long as the phone is unlocked: with
+                // nothing active it is the idle line, or just its own battery / signal glyphs.
+                val keepSb = enabled(TuningStore.SURFACE_STATUS) && lastLocked != true
                 if (!keepSb) removeSbPill() else sbPill?.let { view ->
                     view.setItems(emptyList(), false, 0)
                     // Back to the idle line: the pill has to shrink with it, otherwise it keeps

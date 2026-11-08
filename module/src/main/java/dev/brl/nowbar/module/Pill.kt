@@ -78,8 +78,13 @@ class PillView(context: Context) : View(context) {
         /** However unclear the direction, the guess is made once the finger has gone this far. */
         private const val DRAG_FORCE_LOCK_DP = 26f
 
-        /** Gap between the line and the trailing battery / cellular cluster, in dp. */
-        private const val STATUS_CLUSTER_GAP_DP = 7f
+        /**
+         * The hairline between the line and the trailing battery / network cluster: a rounded
+         * 1.2 dp rule with the same gap on each side. At 27 dp the glyphs would otherwise read as
+         * loose marks inside the pill instead of a group of their own.
+         */
+        private const val STATUS_DIVIDER_W_DP = 1.2f
+        private const val STATUS_DIVIDER_GAP_DP = 3f
 
         /** How far the card gives while the direction is still unknown. */
         private const val DRAG_GIVE_DP = 16f
@@ -113,6 +118,10 @@ class PillView(context: Context) : View(context) {
      * The inverse pill's own battery and signal glyphs (issue #10). They are painted with their own
      * paints so setting a stroke style here can never leak into the card's other glyphs.
      */
+    private val statusDivider = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
     private val statusStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = dp(1.2f)
@@ -269,6 +278,8 @@ class PillView(context: Context) : View(context) {
     private var signalLevel = -1
     /** Custom icon order: false = battery then signal, true = signal then battery. */
     private var statusSignalFirst = false
+    /** Wi-Fi, cellular, or neither: whichever connection the pill should draw (see [Networks]). */
+    private var networkKind = Networks.MOBILE
 
     /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
     private var gray = 0f
@@ -355,8 +366,10 @@ class PillView(context: Context) : View(context) {
                 item.art != null -> glyphSize + dp(9f)
                 else -> 0f
             }
+            // The same gap is reserved on both sides of the hairline, so the fitted width matches
+            // where the rule and the glyphs are actually drawn.
             val clusterW = if (statusGlyphs) {
-                statusClusterWidth(h) + dp(STATUS_CLUSTER_GAP_DP)
+                statusClusterWidth(h) + statusDividerWidth() + dp(STATUS_DIVIDER_GAP_DP) * 2f
             } else {
                 0f
             }
@@ -457,12 +470,18 @@ class PillView(context: Context) : View(context) {
      * system icon cluster, with the values that cluster used to show. -1 means "unknown", which
      * draws an empty battery / empty bars rather than nothing at all.
      */
-    fun setStatusGlyphs(on: Boolean, battery: Int, signal: Int, signalFirst: Boolean = false) {
+    fun setStatusGlyphs(
+        on: Boolean,
+        battery: Int,
+        signal: Int,
+        signalFirst: Boolean = false,
+        network: Int = Networks.MOBILE
+    ) {
         try {
             val b = battery.coerceIn(-1, 100)
             val s = signal.coerceIn(-1, 4)
             if (on == statusGlyphs && b == batteryPct && s == signalLevel &&
-                signalFirst == statusSignalFirst
+                signalFirst == statusSignalFirst && network == networkKind
             ) {
                 return
             }
@@ -470,6 +489,7 @@ class PillView(context: Context) : View(context) {
             batteryPct = b
             signalLevel = s
             statusSignalFirst = signalFirst
+            networkKind = network
             invalidate()
         } catch (t: Throwable) {
             Log.w("PillView.setStatusGlyphs threw", t)
@@ -491,11 +511,26 @@ class PillView(context: Context) : View(context) {
     private fun statusIconHeight(cardH: Float): Float =
         (cardH * 0.44f).coerceIn(dp(7f), dp(13f))
 
-    /** Width the battery + gap + signal cluster takes, for fitting the pill to its line. */
+    /** Width the network glyph takes: Wi-Fi, the cellular bars, or nothing at all. */
+    private fun statusNetworkWidth(cardH: Float): Float {
+        val iconH = statusIconHeight(cardH)
+        return when (networkKind) {
+            Networks.WIFI -> iconH * 1.1f
+            Networks.MOBILE -> iconH * 0.95f
+            else -> 0f
+        }
+    }
+
+    /** Width the battery + gap + network cluster takes, for fitting the pill to its line. */
     private fun statusClusterWidth(cardH: Float): Float {
         val iconH = statusIconHeight(cardH)
-        return iconH * 1.5f + (iconH * 0.4f).coerceAtLeast(dp(2f)) + iconH * 0.95f
+        val netW = statusNetworkWidth(cardH)
+        val gap = if (netW > 0f) (iconH * 0.4f).coerceAtLeast(dp(2f)) else 0f
+        return iconH * 1.5f + gap + netW
     }
+
+    /** Room the separator between the line and the cluster takes. */
+    private fun statusDividerWidth(): Float = dp(STATUS_DIVIDER_W_DP)
 
     /** A battery outline with the charge inside it, ending in a small nub. */
     private fun drawBattery(canvas: Canvas, area: RectF, pct: Int) {
@@ -535,6 +570,39 @@ class PillView(context: Context) : View(context) {
             }
         } catch (t: Throwable) {
             Log.w("PillView battery glyph failed", t)
+        }
+    }
+
+    /** The connection glyph: Wi-Fi when on Wi-Fi, bars for mobile data, nothing when offline. */
+    private fun drawNetwork(canvas: Canvas, area: RectF) {
+        when (networkKind) {
+            Networks.WIFI -> drawWifi(canvas, area)
+            Networks.MOBILE -> drawCellular(canvas, area, signalLevel)
+        }
+    }
+
+    /** The Wi-Fi fan: three nested arcs opening upwards, with a dot under them. */
+    private fun drawWifi(canvas: Canvas, area: RectF) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            statusStroke.strokeWidth = (area.height() * 0.11f).coerceAtLeast(dp(0.9f))
+            val cx = area.centerX()
+            // The fan's origin sits low in the box, so all three arcs fit above it.
+            val cy = area.bottom - area.height() * 0.12f
+            val rMax = area.width() * 0.52f
+            for (i in 0..2) {
+                val r = rMax * (0.42f + i * 0.29f)
+                canvas.drawArc(
+                    RectF(cx - r, cy - r, cx + r, cy + r),
+                    225f,
+                    90f,
+                    false,
+                    statusStroke
+                )
+            }
+            canvas.drawCircle(cx, cy - area.height() * 0.02f, rMax * 0.13f, statusFill)
+        } catch (t: Throwable) {
+            Log.w("PillView wifi glyph failed", t)
         }
     }
 
@@ -861,9 +929,10 @@ class PillView(context: Context) : View(context) {
             return
         }
 
-        // The idle line is the label itself; a blank label means the owner has nothing to say,
-        // so the card is not drawn at all rather than left as an empty shape.
-        if (item == null && (!allowIdle || TuningStore.idleLabel(context).isEmpty())) return
+        // The shape stays even with nothing active: the status pill is what stands in for
+        // Android's battery and signal icons, so it can never be the thing that disappears. The
+        // idle label is the only text there, and a blank label (or the suppression before the
+        // first unlock) simply leaves the shape and its glyphs without a line.
 
         clipToCard(canvas, area, r)
         val art = item?.art
@@ -987,15 +1056,31 @@ class PillView(context: Context) : View(context) {
         if (statusGlyphs) {
             val iconH = statusIconHeight(h)
             val batteryW = iconH * 1.5f
-            val signalW = iconH * 0.95f
+            val networkW = statusNetworkWidth(h)
             val gap = (iconH * 0.4f).coerceAtLeast(dp(2f))
             val right = w - pad
-            val left = right - batteryW - gap - signalW
+            val left = right - statusClusterWidth(h)
             val top = (h - iconH) / 2f
+            // The separator: a short rounded rule, dimmed so it groups the glyphs without
+            // competing with the line of text next to it.
+            val dividerW = statusDividerWidth()
+            val dividerRight = left - dp(STATUS_DIVIDER_GAP_DP)
+            val dividerH = iconH * 0.9f
+            val dividerTop = (h - dividerH) / 2f
+            statusDivider.color = withAlpha(statusFill.color, 0x66)
+            canvas.drawRoundRect(
+                RectF(dividerRight - dividerW, dividerTop, dividerRight, dividerTop + dividerH),
+                dividerW / 2f,
+                dividerW / 2f,
+                statusDivider
+            )
             // Which glyph leads is the owner's choice: the two swap places, the cluster does not.
+            // With no connection there is no network glyph at all, just the battery.
             if (statusSignalFirst) {
-                drawCellular(canvas, RectF(left, top, left + signalW, top + iconH), signalLevel)
-                val batteryLeft = left + signalW + gap
+                if (networkW > 0f) {
+                    drawNetwork(canvas, RectF(left, top, left + networkW, top + iconH))
+                }
+                val batteryLeft = left + networkW + (if (networkW > 0f) gap else 0f)
                 drawBattery(
                     canvas,
                     RectF(batteryLeft, top, batteryLeft + batteryW, top + iconH),
@@ -1003,19 +1088,23 @@ class PillView(context: Context) : View(context) {
                 )
             } else {
                 drawBattery(canvas, RectF(left, top, left + batteryW, top + iconH), batteryPct)
-                val signalLeft = left + batteryW + gap
-                drawCellular(
-                    canvas,
-                    RectF(signalLeft, top, signalLeft + signalW, top + iconH),
-                    signalLevel
-                )
+                val networkLeft = left + batteryW + gap
+                if (networkW > 0f) {
+                    drawNetwork(
+                        canvas,
+                        RectF(networkLeft, top, networkLeft + networkW, top + iconH)
+                    )
+                }
             }
-            textRight = minOf(textRight, left - dp(STATUS_CLUSTER_GAP_DP))
+            textRight = minOf(
+                textRight,
+                dividerRight - dividerW - dp(STATUS_DIVIDER_GAP_DP)
+            )
         }
 
         val available = (textRight - textLeft).coerceAtLeast(0f)
         val title = when {
-            item == null -> label
+            item == null -> if (allowIdle) label else ""
             item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
             else -> item.title.takeIf { it.isNotBlank() } ?: label
         }

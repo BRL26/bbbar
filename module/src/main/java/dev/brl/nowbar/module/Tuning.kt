@@ -22,12 +22,17 @@ object Tuning {
         val radiusDp: Int = TuningStore.DEFAULT_SB_RADIUS_DP,
         val leftDp: Int = TuningStore.DEFAULT_SB_LEFT_DP,
         val topDp: Int = TuningStore.DEFAULT_SB_TOP_DP,
-        /** Landscape overrides; -1 means "use the portrait value above". */
-        val leftLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP,
+        /**
+         * Landscape overrides; -1 means "use the portrait value above". Landscape anchors the
+         * pill to the right end of the strip, so it takes a width and a right margin rather than
+         * a left edge.
+         */
+        val widthLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_WIDTH_DP,
+        val rightMarginLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_RIGHT_DP,
         val topLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
         /**
          * Right end of the strip instead of the left: the pill covers Android's battery and
-         * network icons (hidden by the hook), draws its own, and its card grows leftwards.
+         * network icons (hidden by the hook), draws its own, and its card opens centred.
          */
         val inverse: Boolean = TuningStore.DEFAULT_SB_INVERSE,
         /** Gap to the right edge in inverse mode, where that edge is the fixed one. */
@@ -77,10 +82,15 @@ object Tuning {
             radiusDp = p.getInt("sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP).coerceIn(0, 200),
             leftDp = p.getInt("sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP),
             topDp = p.getInt("sbTopDp", TuningStore.DEFAULT_SB_TOP_DP),
-            leftLandscapeDp = p.getInt(
-                "sbLandscapeLeftDp",
-                TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP
-            ),
+            widthLandscapeDp = p.getInt(
+                TuningStore.SB_LANDSCAPE_WIDTH,
+                TuningStore.DEFAULT_SB_LANDSCAPE_WIDTH_DP
+            ).coerceIn(-1, 1000),
+            // -1 falls through to this when the landscape margin is not set.
+            rightMarginLandscapeDp = p.getInt(
+                TuningStore.SB_LANDSCAPE_RIGHT,
+                TuningStore.DEFAULT_SB_LANDSCAPE_RIGHT_DP
+            ).coerceIn(-1, 200),
             topLandscapeDp = p.getInt(
                 "sbLandscapeTopDp",
                 TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP

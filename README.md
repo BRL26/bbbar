@@ -24,12 +24,13 @@ keyguard by platform rule, which is why the fallback overlay only ever shows ove
 
 ## Placement in landscape
 
-Landscape has no room at the sides — the clock owns the left end of the strip and the battery/status
-icons the right — so the status pill is **centred horizontally** in landscape, in the shade as well as
-in the status bar. Any tuned left edge is ignored there on purpose; only the height is configurable.
-The pill is also allowed to grow much wider than the portrait cap: half the screen with the shade
-open, a third of it in landscape, so a long line gets a long pill instead of a squeezed one (it still
-shrinks to its text when the line is short).
+Landscape anchors the status pill to the **right end** of the strip, the way the inverse portrait
+layout does, in the shade as well as in the status bar: that is the edge the strip is read from, and
+a centred pill in a wide strip read as floating. Two controls move and size it there, both in
+Look → Status bar pill: **Landscape width** and **Landscape right margin** (`-1` on either means
+"use the portrait value"). The width is what lets the pill take up a landscape strip properly -
+setting it large gives a long line a long pill instead of squeezing it into a status-bar-sized box
+(it still shrinks to its text when the line is short).
 
 Two numbers make that possible on the device, both published by the hook, because an accessibility
 service's own display metrics freeze at the size they had when it started:
@@ -39,10 +40,11 @@ service's own display metrics freeze at the size they had when it started:
 | `bbbar_screen_w`, `bbbar_screen_h` | the screen size **SystemUI** sees, so a rotation reaches the app |
 | `bbbar_clock_right_px` | the status bar clock's right edge, `0` when the clock is not shown (the shade) |
 
-The clock edge is what keeps the pill off the time: in portrait its left edge is pushed to the right
-of the clock whatever the tuned value says, and in landscape the same number is why centring clears
-it. With the shade open the clock reports `0`, so the pill sits at a plain **16 dp** margin there
-instead of the width the clock needs.
+The clock edge is what keeps the pill off the time in the normal portrait layout: its left edge is
+pushed to the right of the clock whatever the tuned value says. With the shade open the clock
+reports `0`, so the pill sits at a plain **16 dp** margin there instead of the width the clock needs.
+Right-anchored layouts (inverse portrait, and landscape) do not need the clock edge at all - they
+stop at their own right margin.
 
 Rotation is handled from the display listener (a service does not reliably get
 `onConfigurationChanged`) plus the hook's screen size: any change re-places every window that is up,
@@ -132,7 +134,7 @@ Three surfaces, each with its own geometry:
 | Surface | What it is | Where |
 | --- | --- | --- |
 | Lockscreen pill | 340 × 68 dp, radius 40, 150 dp above the bottom | bottom centre, clear of the fingerprint circle |
-| Status bar pill | 106 × 27 dp, radius 19, 75 dp from the left | over the notification icons, past the clock, short of the cutout |
+| Status bar pill | 106 × 27 dp, radius 19, 10 dp from the right (inverse) | the right end of the strip, in Android's battery / network corner |
 | Expanded popup | 393 × 120 dp, radius 32 | drops out of the status bar pill; auto-centred under the status bar |
 
 Only one collapsed surface is on screen at a time. Unlocking swaps the lock pill for the status
@@ -147,15 +149,24 @@ new title, a timer appearing or the card going away reads as the same shape stre
 that arrives mid-morph retargets from the width on screen; a settings change keeps the current
 width for its first frame, so the pill never flashes wide.
 
+Every number in the settings screen is both a slider and a text field. A slider over 0–1000 dp
+cannot be landed on an exact value by hand, so the value beside each title can be typed: a number,
+`-1` or `auto` (both mean "automatic"), committed with done or by tapping away, clamped to that
+control's range, and the thumb follows it. `prefs dump` over adb shows what was stored.
+
 ## Inverse layout and measure mode
 
 **Inverse: pill at the right end** is on by default and moves the status pill out of the
 notification icons and into Android's battery / network corner. The hook hides `system_icon_area`
 and puts the notification icons back; the pill draws its own battery and signal glyphs from the
 signal level SystemUI publishes, keeps the right edge fixed (with a configurable `sbRightDp`
-margin) and grows its expanded card leftwards. Which glyph leads is a setting (`statusIconOrder`,
-battery first by default). Turning inverse off switches the settings page back to a left-edge
-control and a left-aligned preview.
+margin) and opens its expanded card centred on the screen. The glyphs are separated from the line
+by a short rounded hairline. The network glyph follows the connection: Wi-Fi when the phone is on
+Wi-Fi (even with mobile data also up), the cellular bars when only mobile data is up, and nothing at
+all when it is offline - the battery is always drawn. Which glyph leads is a setting
+(`statusIconOrder`, battery first by
+default). Turning inverse off switches the settings page back to a left-edge control and a
+left-aligned preview.
 
 The camera / microphone privacy indicator lives in that same corner, and its own window is above
 the overlay, so it would sit on top of the pill. While inverse is on the hook hides it with the
@@ -431,9 +442,10 @@ module/src/main/java/dev/brl/nowbar/module/
 - **No per-app allow / deny list yet.** Any app that posts a media session, a chronometer or a
   progress notification becomes a card; individual apps cannot be excluded.
 - **The idle pill is a status bar surface only.** Lockscreen and popup disappear when nothing is
-  active. The status bar pill shows the placeholder label, and it is *only* the label that decides
-  this: blank label → no idle pill, any text → pill. The old Text / Logo / Hide switch is gone,
-  because a stored "Hide" looked exactly like a dead bar and nothing ever reset it.
+  active. The status bar pill never does: it replaces Android's battery and signal icons, so it
+  stays on the strip with the placeholder label as its text, or with no text at all when that label
+  is blank. There is no switch that hides it; the old Text / Logo / Hide switch is gone, because a
+  stored "Hide" looked exactly like a dead bar and nothing ever reset it.
 - **The LSPosed hook only hides**, it never draws or lays out: it sets `alpha` on the status bar's
   notification-icon area children. Everything the pill shows comes from the accessibility overlay,
   which is why a changed Nothing OS build cannot break the pill itself.

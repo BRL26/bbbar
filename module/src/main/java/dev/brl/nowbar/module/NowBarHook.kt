@@ -588,6 +588,26 @@ class NowBarHook : IXposedHookLoadPackage {
             notifArea?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> apply() }
             systemArea?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> apply() }
 
+            // A reconciliation pass, because a re-applied alpha is not a layout: nothing tells the
+            // hook that SystemUI just turned an icon back on. Once a second is enough to make a
+            // stray Wi-Fi / signal icon blink out instead of sitting over the bar.
+            try {
+                val main = Handler(Looper.getMainLooper())
+                val reconcile = object : Runnable {
+                    override fun run() {
+                        try {
+                            apply()
+                        } catch (t: Throwable) {
+                            Log.w("hook: reconcile failed", t)
+                        }
+                        main.postDelayed(this, 1000L)
+                    }
+                }
+                main.postDelayed(reconcile, 1000L)
+            } catch (t: Throwable) {
+                Log.w("hook: reconciler not started", t)
+            }
+
             try {
                 val resolver = context.contentResolver
                 val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
@@ -671,6 +691,12 @@ class NowBarHook : IXposedHookLoadPackage {
             }
 
             systemArea?.let { area ->
+                // The container itself is hidden, not only its children: SystemUI re-applies alpha
+                // to the individual icons whenever a Wi-Fi / signal state changes, and that is how
+                // one of them (usually the Wi-Fi icon) kept flickering back in for a moment while
+                // the pill's own glyphs sat next to it. A zero on the group covers whatever it
+                // holds, including children that were not there when this pass started.
+                if (inverse) hide(area) else restore(area)
                 for (i in 0 until area.childCount) {
                     val child = area.getChildAt(i) ?: continue
                     val name = child.javaClass.name
@@ -785,6 +811,9 @@ class NowBarHook : IXposedHookLoadPackage {
 
     private fun hide(view: View) {
         try {
+            // Already ours and already invisible: skip the invalidate the reconcile loop would
+            // otherwise cause every second on every icon.
+            if (hidden[view] == true && view.alpha == 0f) return
             view.alpha = 0f
             hidden[view] = true
         } catch (t: Throwable) {

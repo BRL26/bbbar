@@ -96,7 +96,9 @@ object TuningStore {
 
     /**
      * What an idle status bar pill says: the label, as typed. A blank label means there is nothing
-     * to say, so no pill is drawn until an activity starts.
+     * to say, so the pill draws no text - it still draws itself and its battery / signal glyphs,
+     * because it is what replaces Android's own icons there and must never be the thing that
+     * disappears.
      *
      * This replaced an explicit Text / Logo / Hide switch. That switch was a stored state nothing
      * ever reset, so it could sit on "Hide" and make a working bar look dead.
@@ -108,9 +110,6 @@ object TuningStore {
             DEFAULT_LABEL
         }
     }
-
-    /** True when an empty pill has a line to show; a blank label hides the idle pill. */
-    fun showIdle(context: Context): Boolean = idleLabel(context).isNotEmpty()
 
     fun scrollText(context: Context): Boolean = isOn(context, SCROLL_TEXT)
 
@@ -188,6 +187,32 @@ object TuningStore {
     /** Landscape overrides for the status bar pill. -1 = use the portrait value. */
     const val DEFAULT_SB_LANDSCAPE_LEFT_DP = -1
     const val DEFAULT_SB_LANDSCAPE_TOP_DP = -1
+
+    /**
+     * Landscape is right-anchored like the inverse portrait layout: the right end of the strip is
+     * the fixed edge, so what moves the pill there is a right margin. The width is its own value
+     * because a landscape strip has far more room than a portrait one - that is what lets the pill
+     * take up the space the old, always-centred placement would not.
+     */
+    const val SB_LANDSCAPE_WIDTH = "sbLandscapeWidthDp"
+    const val DEFAULT_SB_LANDSCAPE_WIDTH_DP = -1
+
+    const val SB_LANDSCAPE_RIGHT = "sbLandscapeRightDp"
+    const val DEFAULT_SB_LANDSCAPE_RIGHT_DP = -1
+
+    fun sbLandscapeWidthDp(context: Context): Int = try {
+        prefs(context).getInt(SB_LANDSCAPE_WIDTH, DEFAULT_SB_LANDSCAPE_WIDTH_DP)
+            .coerceIn(-1, 1000)
+    } catch (t: Throwable) {
+        DEFAULT_SB_LANDSCAPE_WIDTH_DP
+    }
+
+    fun sbLandscapeRightDp(context: Context): Int = try {
+        prefs(context).getInt(SB_LANDSCAPE_RIGHT, DEFAULT_SB_LANDSCAPE_RIGHT_DP)
+            .coerceIn(-1, 200)
+    } catch (t: Throwable) {
+        DEFAULT_SB_LANDSCAPE_RIGHT_DP
+    }
 
     /**
      * The inverse layout (issue #10): the status pill sits at the right end of the strip, where
@@ -354,6 +379,8 @@ object TuningStore {
         e.putInt("sbTopDp", DEFAULT_SB_TOP_DP)
         e.putInt("sbLandscapeLeftDp", DEFAULT_SB_LANDSCAPE_LEFT_DP)
         e.putInt("sbLandscapeTopDp", DEFAULT_SB_LANDSCAPE_TOP_DP)
+        e.putInt(SB_LANDSCAPE_WIDTH, DEFAULT_SB_LANDSCAPE_WIDTH_DP)
+        e.putInt(SB_LANDSCAPE_RIGHT, DEFAULT_SB_LANDSCAPE_RIGHT_DP)
         e.putString(STATUS_ICON_ORDER, DEFAULT_STATUS_ICON_ORDER)
         e.putInt(SB_RIGHT_MARGIN, DEFAULT_SB_RIGHT_MARGIN_DP)
 

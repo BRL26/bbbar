@@ -374,11 +374,13 @@ class PillView(context: Context) : View(context) {
                 item.art != null -> glyphSize + dp(9f)
                 else -> 0f
             }
-            // Room for the rule and the widest gap it can take, so a fitted pill never crowds
-            // the line against its own glyphs.
+            // Room for the rule and the gap on each side of it. The line's side keeps its extra
+            // margin out of this width, so adding it moves the rule away from the line instead of
+            // towards the icons.
             val clusterW = if (statusGlyphs) {
                 statusClusterWidth(h) + statusDividerWidth() +
-                    dp(STATUS_DIVIDER_TEXT_GAP_DP) + dp(STATUS_DIVIDER_ICON_GAP_DP)
+                    dp(STATUS_DIVIDER_TEXT_GAP_DP) + dp(STATUS_DIVIDER_ICON_GAP_DP) +
+                    dp(STATUS_DIVIDER_LINE_EXTRA_DP)
             } else {
                 0f
             }
@@ -1085,11 +1087,12 @@ class PillView(context: Context) : View(context) {
             val dividerW = statusDividerWidth()
             val iconGap = dp(STATUS_DIVIDER_ICON_GAP_DP)
             val textEnd = (textLeft + titlePaint.measureText(title)).coerceAtMost(textRight)
+            // Split what is there *after* the line's extra has been set aside, so both sides keep
+            // their share: the text gets its extra margin and the glyphs keep the gap they had.
+            val extra = dp(STATUS_DIVIDER_LINE_EXTRA_DP)
             val space = (left - textEnd - dividerW).coerceAtLeast(0f)
-            val ruleGap = (space / 2f).coerceIn(iconGap, dp(9f))
-            // A touch more room on the line's side than on the glyph side: the rule belongs to the
-            // text block, and an even split still read as it crowding the last letter.
-            val lineGap = ruleGap + dp(STATUS_DIVIDER_LINE_EXTRA_DP)
+            val ruleGap = (((space - extra) / 2f).coerceAtLeast(0f)).coerceIn(iconGap, dp(9f))
+            val lineGap = ruleGap + extra
             var dividerRight = textEnd + lineGap + dividerW
             if (dividerRight > left - iconGap) dividerRight = left - iconGap
             val dividerLeft = dividerRight - dividerW

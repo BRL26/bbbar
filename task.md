@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.0.2, published** (`github.com/BRL26/bbbar`, tag `v2.0.2`). Base is settled: the accessibility
+**v2.1.0, published** (`github.com/BRL26/bbbar`, tag `v2.1.0`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -21,6 +21,33 @@ Enable / disable:
   ```
 
 ## Done (verified on the device)
+
+### 2.1.0 — strip placement and the pill's clock
+- [x] **Placement is a real choice**: **Right** (Android's battery / network corner, the inverse
+      layout), **Left** (after the clock, over the notification icons) and **Left, no clock**. The
+      clock-off left layout is the right-hand one mirrored: same width, height, top and margin, with
+      `sbRightDp` read as a left margin. Verified `sb pill updated: 240x113px at x=26 y=6px` at a
+      10 dp margin, and the pill kept `y=6` while moving ends.
+- [x] **The bar's clock is hidden for the clock-off layout**, portrait only (landscape stays at the
+      right end, clock and all). `bbar_hide_clock` follows the placement, and the mask is a
+      `ContentObserver` away plus a per-tick reconcile. Verified steady `bbbar_clock_right_px=0`.
+- [x] **The clock cannot paint a frame**: `Clock` is a `TextView` with no `draw` of its own, so the
+      instance's inherited `onDraw` is skipped while masked (gated on the instance, 2 methods
+      hooked). Verified from the log: `hook: clock draw hooked (2 methods,
+      com.android.systemui.statusbar.policy.Clock)`, no re-show events, no SystemUI crash.
+- [x] **Idle clock**: idle text can be **Text**, **Clock**, or **Clock + text**. The time uses the
+      bar's own `DateFormat.getTimeFormat`, repaints on the minute boundary and the pill refits to
+      it. A live card always wins. Verified `5:12 PM` alone and `5:17 PM  Now Bar` with text.
+- [x] **A trimmed clock is not allowed**: the idle clock is the one line that may measure past the
+      tuned width (up to the strip), because a cut-off time is wrong information. Verified: the
+      default 106 dp pill grew to fit `5:11 PM` beside the battery / Wi-Fi glyphs.
+- [x] **Defaults are the phone's own config**: left, no clock; 160 × 27 dp, radius 19, 20 dp from
+      the edge; signal before battery; idle line `clockThenLabel`; placeholder `:)`.
+- [ ] **The clock-off layout has no strip pill on the keyguard** (the keyguard's own bar is left
+      alone). Implemented on every path that adds or keeps it; not verified on hardware yet, because
+      locking the phone needs the owner's PIN to get back in.
+- [x] **Settings labels fit**: the three placement buttons read **Right**, **Left**, **Left, no
+      clock**; longer labels were ellipsized to `Left, after…` and `Left, cloc…` in the toggle row.
 
 ### Pill and surfaces
 - [x] Pill as `TYPE_ACCESSIBILITY_OVERLAY`, above the keyguard (`Window #2`)

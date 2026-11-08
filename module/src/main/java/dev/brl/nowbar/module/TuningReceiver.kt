@@ -56,7 +56,11 @@ class TuningReceiver : BroadcastReceiver() {
                 intents(intent).forEach { k ->
                     sb.append(k).append('=').append(p.all[k] ?: "unset").append(' ')
                 }
-                sb.append("popupLabel=").append(p.all["popupLabel"] ?: "unset")
+                // Every stored key, so a dialled-in file can be copied into the build's
+                // defaults without guessing which values were tuned and which were left alone.
+                p.all.toSortedMap().forEach { (key, value) ->
+                    sb.append(key).append('=').append(value ?: "unset").append(' ')
+                }
                 Log.i(sb.toString())
                 return
             }
@@ -78,6 +82,17 @@ class TuningReceiver : BroadcastReceiver() {
             }
             if (intent.hasExtra(TuningStore.RANK_ORDER)) {
                 edit.putString(TuningStore.RANK_ORDER, intent.getStringExtra(TuningStore.RANK_ORDER))
+                changed = true
+            }
+            if (intent.hasExtra(TuningStore.SB_SIDE)) {
+                edit.putString(TuningStore.SB_SIDE, intent.getStringExtra(TuningStore.SB_SIDE))
+                changed = true
+            }
+            if (intent.hasExtra(TuningStore.IDLE_CONTENT)) {
+                edit.putString(
+                    TuningStore.IDLE_CONTENT,
+                    intent.getStringExtra(TuningStore.IDLE_CONTENT)
+                )
                 changed = true
             }
             if (intent.hasExtra(TuningStore.STATUS_ICON_ORDER)) {
@@ -114,7 +129,6 @@ class TuningReceiver : BroadcastReceiver() {
         TuningStore.FEATURE_LIVE,
         TuningStore.AOD_GRAY,
         TuningStore.AOD_LINE_STYLE,
-        TuningStore.SB_INVERSE,
         TuningStore.OUTLINE
     )
 

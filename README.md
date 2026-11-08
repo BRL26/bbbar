@@ -1,6 +1,10 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.0.2** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.0.2)
+**v2.1.0** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
+
+New in this build: **strip placement** (right end, left end, or the clock-less left side) and the
+pill's own **idle clock**. The shipped defaults are the ones dialled in on the phone: left side with
+the bar's clock off, 160 × 27 dp, 20 dp from the left, and the idle line reads `5:11 PM :)`.
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that
@@ -113,6 +117,12 @@ Two switches, in **Settings → Android status bar**:
 | --- | --- | --- |
 | Hide notification icons | `bbbar_hide_notif_icons` | the app icons next to the clock |
 | Hide Android live updates | `bbbar_hide_live_chips` | the system's own Live Update chips |
+| (placement) | `bbbar_inverse` | Android's battery / network cluster and the privacy dot, for the right-end layout |
+| (placement) | `bbbar_hide_clock` | the strip's clock, for the clock-less left layout (portrait only) |
+
+The two placement flags are not switches in the app: they follow **Placement** on the status bar
+page. `bbbar_hide_clock` masks the same clock view the hook samples for `bbbar_clock_right_px`, so a
+hidden clock reports a right edge of `0` and the left-edge layout simply has nothing to avoid.
 
 Both are read by SystemUI from `Settings.Global` (writable only through root, which the app uses) and
 watched with a `ContentObserver`, so flipping a switch takes effect without a restart. The hook
@@ -153,7 +163,7 @@ Three surfaces, each with its own geometry:
 | Surface | What it is | Where |
 | --- | --- | --- |
 | Lockscreen pill | 340 × 68 dp, radius 40, 150 dp above the bottom | bottom centre, clear of the fingerprint circle |
-| Status bar pill | 106 × 27 dp, radius 19, 10 dp from the right (inverse) | the right end of the strip, in Android's battery / network corner |
+| Status bar pill | 160 × 27 dp, radius 19, 20 dp from the left (clock off) | the left end of the strip, with Android's clock hidden — or the right end of the strip, in Android's battery / network corner |
 | Expanded popup | 393 × 120 dp, radius 32 | drops out of the status bar pill; auto-centred under the status bar |
 
 Only one collapsed surface is on screen at a time. Unlocking swaps the lock pill for the status
@@ -178,24 +188,46 @@ cannot be landed on an exact value by hand, so the value beside each title can b
 `-1` or `auto` (both mean "automatic"), committed with done or by tapping away, clamped to that
 control's range, and the thumb follows it. `prefs dump` over adb shows what was stored.
 
-## Inverse layout and measure mode
+## Strip placement, the pill clock, and measure mode
 
-**Inverse: pill at the right end** is on by default and moves the status pill out of the
-notification icons and into Android's battery / network corner. The hook hides `system_icon_area`
-and puts the notification icons back; the pill draws its own battery and signal glyphs from the
-signal level SystemUI publishes, keeps the right edge fixed (with a configurable `sbRightDp`
-margin) and opens its expanded card centred on the screen. The glyphs are separated from the line
-by a short rounded hairline. The network glyph follows the connection: Wi-Fi when the phone is on
-Wi-Fi (even with mobile data also up), the cellular bars when only mobile data is up, and nothing at
-all when it is offline - the battery is always drawn. Which glyph leads is a setting
-(`statusIconOrder`, battery first by
-default). Turning inverse off switches the settings page back to a left-edge control and a
-left-aligned preview.
+**Placement** (Look → Status bar pill) has three values, and each one decides both where the pill is
+and what the hook does to Android's strip:
 
-The camera / microphone privacy indicator lives in that same corner, and its own window is above
-the overlay, so it would sit on top of the pill. While inverse is on the hook hides it with the
-rest of the cluster (`privacy_chip_container`, or any `*Privacy*` view on a build that places it
-elsewhere), and restores it untouched when inverse is off.
+| Placement | Where | Hook |
+| --- | --- | --- |
+| **Right** | Android's battery / network corner, `sbRightDp` from the right | hides `system_icon_area` and the privacy dot, restores the notification icons |
+| **Left** | over the notification icons, at `sbLeftDp` (or just past the clock) | leaves the right cluster and the clock alone, hides the notification icons |
+| **Left, no clock** (default) | the left end, `sbRightDp` **read as a left margin** | hides the clock (portrait), so the pill has that whole side |
+
+Right and left clock-off are the same layout mirrored: width, height, top and margin are the same
+numbers, which is why switching between them does not re-tune anything. Landscape keeps the right
+end in all three, so its clock stays. The clock-off layout also has no strip pill on the keyguard:
+the keyguard draws its own bar, at its own clock, so a pill there would be a second status bar over
+the first.
+
+The clock is suppressed where alpha alone loses a frame: the hook keeps the clock's `INVISIBLE`
+state and also skips the draw calls of that one instance (the class is `Clock`, a `TextView`, so the
+skip lives on `onDraw` and is gated on the instance). SystemUI re-shows the clock around the shade
+and screen-on, and that pass was the split second the time appeared before the next mask tick.
+
+In the right-end layout the pill draws its own battery and signal glyphs from the signal level
+SystemUI publishes, keeps its right edge fixed and opens its expanded card centred on the screen.
+The glyphs are separated from the line by a short rounded hairline. The network glyph follows the
+connection: Wi-Fi when the phone is on Wi-Fi (even with mobile data also up), the cellular bars when
+only mobile data is up, and nothing at all when it is offline - the battery is always drawn. Which
+glyph leads is a setting (`statusIconOrder`, battery first by default).
+
+The camera / microphone privacy indicator lives in that corner, and its own window is above the
+overlay, so it would sit on top of the pill. While the right-end layout is on, the hook hides it
+with the rest of the cluster (`privacy_chip_container`, or any `*Privacy*` view on a build that
+places it elsewhere), and restores it untouched otherwise.
+
+**When idle** decides what the pill says with nothing active: **Text** (the placeholder), **Clock**
+(the time, replacing the placeholder) or **Clock + text** (the time with the placeholder after it —
+the default). The time uses the bar's own `DateFormat.getTimeFormat` and the pill's text paint,
+repaints on the minute boundary, and the pill refits its width to it. A live card always wins: the
+clock is only ever the idle line. Clock or clock + text is what makes **Left, no clock** coherent -
+the pill is then the strip's clock instead of sitting beside one.
 
 **Measure mode (outline only)** (Look → Surfaces) draws every surface as an empty outline: no
 text, artwork, progress or glyphs, and the surfaces stay up with nothing active. It is for setting
@@ -362,9 +394,11 @@ then does back leave the app.
 - **Look** — the three surface switches, then one sub-page per surface plus the look pages:
   **Lockscreen pill**, **Status bar pill**, **Expanded card**, **Media artwork**, **Text and motion**,
   **Always-on display** and **Idle line**. Sliders run `0…1000 dp`; `-1` on a left/top value means
-  *auto*. The status bar page shows either a left edge or, with inverse on, the right margin, plus
-  the battery / signal order. The pill in the shade / Quick Settings is the same one, at the same
-  place, so there are no shade-specific controls.
+  *auto*. The status bar page shows the placement, the idle line, and the edge control that
+  belongs to that placement (left edge, or the margin read from the anchored side), plus the
+  battery / signal order. Its three placement buttons read **Right**, **Left** and **Left, no
+  clock**; the caption under them spells out the difference. The pill in the shade / Quick
+  Settings is the same one, at the same place, so there are no shade-specific controls.
 - **Activities** — the item switches (media, timers, alarms, live updates), the **ranking** list with
   ▲/▼, notification access, the app exclusions, the status-bar hiding switches, and **simulate**: a
   fake card of each kind drawn on the real pill, for judging a look without waiting for an activity.
@@ -418,6 +452,9 @@ The same keys the sliders write, for when the pill is covering something:
 ```bash
 adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
   --ei widthDp 340 --ei heightDp 68 --ei bottomDp 150
+
+adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
+  --es sbSide leftNoClock --es idleContent clockThenLabel
 
 adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
   --ez dump true      # log every stored value

@@ -310,6 +310,12 @@ class PillView(context: Context) : View(context) {
     private val controlKeys = ArrayList<String>(3)
 
     private var label = TuningStore.DEFAULT_LABEL
+
+    /**
+     * What an idle pill draws: the placeholder, the time, or the time with the placeholder after
+     * it. A live card always wins over all three.
+     */
+    private var idleContent = TuningStore.DEFAULT_IDLE_CONTENT
     private var items: List<NowBarItem> = emptyList()
     private var textDp = TuningStore.DEFAULT_TEXT_DP
     private var radiusOverrideDp = 0f
@@ -522,7 +528,7 @@ class PillView(context: Context) : View(context) {
             val glyphSize = (h - pad * 2f).coerceAtMost(dp(34f)).coerceAtLeast(dp(14f))
             val item = frontItem
             val text = when {
-                item == null -> label
+                item == null -> idleLine()
                 item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
                 else -> item.title.takeIf { it.isNotBlank() } ?: label
             }
@@ -991,6 +997,93 @@ class PillView(context: Context) : View(context) {
         }
     }
 
+    /** Chooses what an idle pill says (see [TuningStore.IDLE_CONTENT]). */
+    fun setIdleContent(mode: String) {
+        try {
+            val next = when (mode) {
+                TuningStore.IDLE_CONTENT_CLOCK,
+                TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL -> mode
+                else -> TuningStore.IDLE_CONTENT_LABEL
+            }
+            if (next == idleContent) return
+            idleContent = next
+            scheduleIdleClockTick()
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setIdleContent threw", t)
+        }
+    }
+
+    private fun idleShowsClock(): Boolean =
+        idleContent == TuningStore.IDLE_CONTENT_CLOCK ||
+            idleContent == TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL
+
+    /**
+     * True while the line on screen is the idle clock - the one line the tuned width may not
+     * trim. A clock cut short is wrong information, not a smaller pill, so the service lets the
+     * pill measure this line against the strip instead (it still shrinks to the time).
+     */
+    fun idleLineWantsRoom(): Boolean = frontItem == null && allowIdle && idleShowsClock()
+
+    /** Cached with the view: a locale or 24-hour change comes with a new window anyway. */
+    private val clockFormat: java.text.DateFormat by lazy {
+        android.text.format.DateFormat.getTimeFormat(context)
+    }
+
+    /** The time as the bar formats it, so 12/24-hour and the locale match the rest of the strip. */
+    private fun clockText(): String = try {
+        clockFormat.format(java.util.Date())
+    } catch (t: Throwable) {
+        ""
+    }
+
+    /**
+     * The idle line: the placeholder, the time, or the time followed by the placeholder. Only the
+     * idle line - a card with something in it draws its own title.
+     */
+    private fun idleLine(): String {
+        if (!idleShowsClock()) return label
+        val time = clockText()
+        return if (idleContent == TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL && label.isNotBlank()) {
+            // Two spaces: a rendered gap, so the placeholder reads as its own word instead of
+            // running into the minutes.
+            "$time  $label"
+        } else {
+            time
+        }
+    }
+
+    private val idleClockTick = object : Runnable {
+        override fun run() {
+            if (!idleShowsClock()) return
+            // The minute changed: repaint, and stay armed for the next one.
+            invalidate()
+            scheduleIdleClockTick()
+        }
+    }
+
+    /** Repaints on the next minute boundary, so a pill clock never sits a minute behind. */
+    private fun scheduleIdleClockTick() {
+        try {
+            removeCallbacks(idleClockTick)
+            if (!idleShowsClock()) return
+            val wait = 60_000L - (System.currentTimeMillis() % 60_000L) + 40L
+            postDelayed(idleClockTick, wait)
+        } catch (t: Throwable) {
+            Log.w("PillView idle clock tick failed", t)
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        scheduleIdleClockTick()
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(idleClockTick)
+        super.onDetachedFromWindow()
+    }
+
     fun setItem(item: NowBarItem?, expanded: Boolean) =
         setItems(if (item == null) emptyList() else listOf(item), expanded, 0)
 
@@ -1346,7 +1439,7 @@ class PillView(context: Context) : View(context) {
 
         // The line, before the rule is placed: the gap beside it depends on where its ink ends.
         val title = when {
-            item == null -> if (allowIdle) label else ""
+            item == null -> if (allowIdle) idleLine() else ""
             item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
             else -> item.title.takeIf { it.isNotBlank() } ?: label
         }

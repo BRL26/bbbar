@@ -58,6 +58,13 @@ class NowBarHook : IXposedHookLoadPackage {
         const val KEY_INVERSE = "bbbar_inverse"
 
         /**
+         * 1 while the pill takes the left end of the strip with the clock switched off, so the
+         * clock is drawn in the pill instead. Portrait only: the landscape pill stays at the right
+         * end, where the bar's own clock is not in its way.
+         */
+        const val KEY_HIDE_CLOCK = "bbbar_hide_clock"
+
+        /**
          * Cellular signal level (0..4) as SystemUI reads it, or -1 when there is no reading. The
          * inverse pill draws the bars itself, so it needs the number the hidden icons used.
          */
@@ -237,6 +244,13 @@ class NowBarHook : IXposedHookLoadPackage {
 
     /** The status bar clock, once found; the tree is only walked until it is. */
     private var clockView: View? = null
+
+    /** True while the strip's clock must not paint (clock-less left layout, portrait). */
+    @Volatile
+    private var clockMasked = false
+
+    /** Set once the clock instance's draw methods are hooked, so that happens only once. */
+    private var clockDrawHooked = false
 
     /** Last clock edge published, so a steady bar costs no provider writes. */
     private var lastClockRight = -1
@@ -481,7 +495,10 @@ class NowBarHook : IXposedHookLoadPackage {
                             clockView = it
                             Log.i("hook: clock found (${it.javaClass.simpleName}, id name matched)")
                         }
-                        if (clock != null) publishClock(clock)
+                        if (clock != null) {
+                            publishClock(clock)
+                            maskClock(statusBar.context, clock)
+                        }
                         publishScreen(statusBar)
                         // The privacy dot appears and disappears between layouts, so it is swept
                         // here as well: a dot SystemUI re-shows is gone again within half a second.
@@ -515,6 +532,78 @@ class NowBarHook : IXposedHookLoadPackage {
         } catch (t: Throwable) {
             Log.w("hook: screen write failed", t)
         }
+    }
+
+    /**
+     * Hides the strip's clock while the pill owns the left end and draws the time itself
+     * ([KEY_HIDE_CLOCK]). INVISIBLE rather than alpha alone, for the same reason as the icon
+     * cluster: SystemUI rewrites alpha around the shade, and a frame of the old clock would show
+     * through the pill.
+     */
+    private fun maskClock(context: Context, clock: View) {
+        try {
+            val portrait = context.resources.configuration.orientation ==
+                android.content.res.Configuration.ORIENTATION_PORTRAIT
+            clockMasked = flag(context, KEY_HIDE_CLOCK) && portrait
+            if (clockMasked) {
+                hookClockDraw(clock)
+                hide(clock)
+            } else {
+                restore(clock)
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: clock mask threw", t)
+        }
+    }
+
+    /**
+     * Hooks the clock instance's own draw calls, for the frame alpha cannot cover.
+     *
+     * INVISIBLE is enough most of the time, but SystemUI re-shows the clock around the shade and
+     * screen-on, and that pass is exactly the split second the old clock appeared before the next
+     * mask tick. The hook tests the instance, so a plain `TextView` clock does not affect other
+     * views of the same class.
+     */
+    private fun hookClockDraw(clock: View) {
+        if (clockDrawHooked) return
+        clockDrawHooked = true
+        var hooked = 0
+        val skip = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!clockMasked) return
+                if (param.thisObject !== clock) return
+                param.result = null
+            }
+        }
+        try {
+            var cls: Class<*>? = clock.javaClass
+            var own = true
+            while (cls != null && cls != Any::class.java) {
+                for (m in cls.declaredMethods) {
+                    // `Clock` is a TextView: it declares no draw of its own, and the painting that
+                    // matters is `onDraw`. Only the clock's own class gets draw/dispatchDraw, so
+                    // the process-wide hook is on the one method TextView already calls, not on
+                    // every View draw in SystemUI.
+                    val wanted = if (own) {
+                        m.name == "draw" || m.name == "dispatchDraw" || m.name == "onDraw"
+                    } else {
+                        m.name == "onDraw"
+                    }
+                    if (!wanted) continue
+                    // Only void overloads: a boolean `draw` is read by drawChild, and cancelling
+                    // it leaves it unboxing null - the crash loop that put LSPosed in safe mode.
+                    if (m.returnType != java.lang.Void.TYPE) continue
+                    if (java.lang.reflect.Modifier.isStatic(m.modifiers)) continue
+                    XposedBridge.hookMethod(m, skip)
+                    hooked++
+                }
+                own = false
+                cls = cls.superclass
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: clock draw hook failed", t)
+        }
+        Log.i("hook: clock draw hooked ($hooked methods, ${clock.javaClass.name})")
     }
 
     /** Writes the clock's right edge, or 0 when it is faded out or gone. */
@@ -707,6 +796,14 @@ class NowBarHook : IXposedHookLoadPackage {
                 privacyAreaRef = java.lang.ref.WeakReference(privacyArea)
                 hookAreaDraws(privacyArea, KIND_PRIVACY)
             }
+            // Found here as well as in the sampler: the first mask has to land before the bar's
+            // first frame, not on the next 500 ms tick.
+            if (clockView == null) {
+                clockView = findByIdNames(statusBar, CLOCK_ID_NAMES)?.also {
+                    Log.i("hook: clock found (${it.javaClass.simpleName}, id name matched)")
+                }
+            }
+            clockView?.let { maskClock(context, it) }
             if (notifArea == null && systemArea == null) return
             val apply = { applySwitches(context, notifArea, systemArea, statusBar) }
             apply()
@@ -758,6 +855,9 @@ class NowBarHook : IXposedHookLoadPackage {
                 )
                 resolver.registerContentObserver(
                     Settings.Global.getUriFor(KEY_INVERSE), false, observer
+                )
+                resolver.registerContentObserver(
+                    Settings.Global.getUriFor(KEY_HIDE_CLOCK), false, observer
                 )
             } catch (t: Throwable) {
                 Log.w("hook: switch observer not registered", t)
@@ -855,6 +955,10 @@ class NowBarHook : IXposedHookLoadPackage {
             // on top of it. Both the AOSP container and any view whose class says Privacy are
             // covered, because the dot is created by its own controller.
             hidePrivacy(root, inverse)
+
+            // The clock mask follows the same layout switch, and this pass runs on every layout,
+            // so it is also where the flag is read back after a settings change.
+            clockView?.let { maskClock(context, it) }
         } catch (t: Throwable) {
             Log.e("hook: applySwitches threw", t)
         }

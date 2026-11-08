@@ -578,13 +578,9 @@ class SettingsActivity : AppCompatActivity() {
             // cleared by hand - it is a session fact, not a setting.
             getSharedPreferences("nowbar_session", MODE_PRIVATE).edit().clear().apply()
             Log.sync(this)
-            // The hook's flags live in Settings.Global, not in these prefs: put the inverse flag
-            // back too, or a reset would leave Android's battery icons hidden with the pill back
-            // on the left.
-            Thread {
-                val value = if (TuningStore.DEFAULT_SB_INVERSE) 1 else 0
-                RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $value")
-            }.start()
+            // The hook's flags live in Settings.Global, not in these prefs: put both back too, or
+            // a reset would leave Android's icons hidden (or its clock) with the pill elsewhere.
+            pushHookLayout()
             sendBroadcast(
                 Intent(this, TuningReceiver::class.java).setAction(TuningReceiver.ACTION_RELOAD)
             )
@@ -759,30 +755,41 @@ class SettingsActivity : AppCompatActivity() {
     private fun statusBarPage() {
         val body = card(
             "Status bar pill",
-            "Always on the strip; at the right end unless inverse is off"
+            "Always on the strip; right end, left end, or the whole left side"
         )
         sbPreview = preview(body)
         sbCaption = caption(body)
-        // Inverse (issue #10): a store change reaches the overlay; the global flag reaches the
-        // hook, which owns hiding Android's cluster and restoring the notification icons.
-        switchRow(
+        // Placement: a store change reaches the overlay; the global flags reach the hook, which
+        // owns hiding Android's cluster (right end) or its clock (clock-less left end).
+        choiceRow(
             body,
-            "Inverse: pill at the right end",
-            "On by default. Hides Android's battery / network icons and the privacy dot, brings " +
-                "the notification icons back and draws the battery and signal in the pill, with " +
-                "a hairline between them and the line. The expanded card is centred.",
-            TuningStore.sbInverse(this)
-        ) { on ->
-            prefs.edit().putBoolean(TuningStore.SB_INVERSE, on).apply()
-            Thread {
-                val value = if (on) 1 else 0
-                RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $value")
-                runOnUiThread { Log.i("${NowBarHook.KEY_INVERSE} = $value") }
-            }.start()
-            // The edge control follows the layout: left edge is only meaningful when the pill
-            // is not anchored to the right.
+            "Placement",
+            TuningStore.SB_SIDE,
+            TuningStore.sbSide(this),
+            // Short on purpose: three buttons share one row, and a longer label is ellipsized
+            // into something unreadable. The caption below spells out what each one does.
+            listOf(
+                TuningStore.SB_SIDE_RIGHT to "Right",
+                TuningStore.SB_SIDE_LEFT to "Left",
+                TuningStore.SB_SIDE_LEFT_NO_CLOCK to "Left, no clock"
+            )
+        ) {
+            pushHookLayout()
+            // The edge control follows the layout: a left edge only means something when the
+            // pill is not anchored to a fixed edge.
             renderPage()
         }
+        choiceRow(
+            body,
+            "When idle",
+            TuningStore.IDLE_CONTENT,
+            TuningStore.idleContent(this),
+            listOf(
+                TuningStore.IDLE_CONTENT_LABEL to "Text",
+                TuningStore.IDLE_CONTENT_CLOCK to "Clock",
+                TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL to "Clock + text"
+            )
+        ) { refreshPreviews() }
         choiceRow(
             body,
             "Battery / signal order",
@@ -790,7 +797,7 @@ class SettingsActivity : AppCompatActivity() {
             prefs.getString(TuningStore.STATUS_ICON_ORDER, TuningStore.DEFAULT_STATUS_ICON_ORDER)
                 ?: TuningStore.DEFAULT_STATUS_ICON_ORDER,
             listOf(
-                TuningStore.DEFAULT_STATUS_ICON_ORDER to "Battery first",
+                TuningStore.STATUS_ICON_ORDER_BATTERY_FIRST to "Battery first",
                 TuningStore.STATUS_ICON_ORDER_SIGNAL_FIRST to "Signal first"
             )
         )
@@ -800,16 +807,24 @@ class SettingsActivity : AppCompatActivity() {
         }
         sliderRow(body, "Text size", "sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP, null)
         sliderRow(body, "Corner radius (0 = pill)", "sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP, null)
-        if (TuningStore.sbInverse(this)) {
-            sliderRow(
+        when (TuningStore.sbSide(this)) {
+            TuningStore.SB_SIDE_RIGHT -> sliderRow(
                 body,
                 "Right margin",
                 TuningStore.SB_RIGHT_MARGIN,
                 TuningStore.DEFAULT_SB_RIGHT_MARGIN_DP,
                 null
             )
-        } else {
-            sliderRow(
+            // The clock-less left side is the right-hand layout mirrored, so it moves with the
+            // same number - read as a left margin.
+            TuningStore.SB_SIDE_LEFT_NO_CLOCK -> sliderRow(
+                body,
+                "Left margin",
+                TuningStore.SB_RIGHT_MARGIN,
+                TuningStore.DEFAULT_SB_RIGHT_MARGIN_DP,
+                null
+            )
+            else -> sliderRow(
                 body,
                 "Left edge (-1 = auto)",
                 "sbLeftDp",
@@ -843,12 +858,32 @@ class SettingsActivity : AppCompatActivity() {
         )
         captionView(
             body,
-            "Landscape is set separately because the bar is shallower there and has far more room " +
-                "across. It is right-anchored like the inverse portrait layout, so the right margin " +
-                "is what moves it and -1 means \"use the portrait value\". In portrait, inverse " +
-                "anchors the pill to the right too; with inverse off the left edge is used, where " +
-                "-1 means \"just past the clock\"."
+            "Right is Android's battery / network corner: the hook hides that cluster and the " +
+                "privacy dot, brings the notification icons back, and the pill draws the battery " +
+                "and signal itself. Left puts it back over the notification icons, after the clock. " +
+                "Left, no clock hides the bar's clock (portrait) so the pill has that whole side, " +
+                "and takes it off the lock screen too: " +
+                "it uses this page's measurements with the margin read from the left. Landscape " +
+                "always takes the right end, so the right margin is what moves it there and -1 " +
+                "means \"use the portrait value\". \"When idle\" applies only with nothing active: " +
+                "clock draws the time in the pill, clock + text puts the placeholder after it."
         )
+    }
+
+    /**
+     * Writes both strip flags to Settings.Global at once: the hook owns what Android draws in the
+     * strip - the right-hand icon cluster and privacy dot for the right-end layout, the clock for
+     * the clock-less left layout.
+     */
+    private fun pushHookLayout() {
+        val side = TuningStore.sbSide(this)
+        val inverse = if (side == TuningStore.SB_SIDE_RIGHT) 1 else 0
+        val clock = if (side == TuningStore.SB_SIDE_LEFT_NO_CLOCK) 1 else 0
+        Thread {
+            RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $inverse")
+            RootShell.run("settings put global ${NowBarHook.KEY_HIDE_CLOCK} $clock")
+            runOnUiThread { Log.i("strip flags: inverse=$inverse hideClock=$clock") }
+        }.start()
     }
 
     private fun popupPage() {
@@ -1959,8 +1994,10 @@ class SettingsActivity : AppCompatActivity() {
                 prefs.getInt("sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP),
                 label
             )
-            // The preview follows the layout: a right-anchored pill is shown on the right.
-            view.setAlignRight(TuningStore.sbInverse(this))
+            // The preview follows the layout: each placement is shown against its own edge.
+            val side = TuningStore.sbSide(this)
+            view.setAlignRight(side == TuningStore.SB_SIDE_RIGHT)
+            view.setAlignLeft(side == TuningStore.SB_SIDE_LEFT_NO_CLOCK)
             sbCaption?.text = "$w × $h dp"
         }
         popupPreview?.let { view ->
@@ -2153,12 +2190,19 @@ class SettingsActivity : AppCompatActivity() {
             strokeWidth = 1.4f * resources.displayMetrics.density
         }
 
-        /** Status pill preview: draw against the right edge when inverse is on. */
+        /** Status pill preview: which end of the row the shape is drawn against. */
         private var alignRight = false
+        private var alignLeft = false
 
         fun setAlignRight(on: Boolean) {
             if (alignRight == on) return
             alignRight = on
+            invalidate()
+        }
+
+        fun setAlignLeft(on: Boolean) {
+            if (alignLeft == on) return
+            alignLeft = on
             invalidate()
         }
         private val text = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -2213,7 +2257,11 @@ class SettingsActivity : AppCompatActivity() {
                 val s = scaleFor(width.toFloat())
                 val w = dp(widthDp.toFloat()).coerceAtLeast(1f) * s
                 val h = dp(heightDp.toFloat()).coerceAtLeast(1f) * s
-                val left = if (alignRight) (width - w).coerceAtLeast(0f) else (width - w) / 2f
+                val left = when {
+                    alignRight -> (width - w).coerceAtLeast(0f)
+                    alignLeft -> 0f
+                    else -> (width - w) / 2f
+                }
                 val top = (height - h) / 2f
                 val radius = if (radiusDp > 0) minOf(dp(radiusDp.toFloat()) * s, h / 2f) else h / 2f
                 rect.set(left, top, left + w, top + h)

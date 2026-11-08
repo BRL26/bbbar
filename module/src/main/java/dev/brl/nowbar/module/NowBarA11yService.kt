@@ -535,7 +535,7 @@ class NowBarA11yService : AccessibilityService() {
             TuningStore.maybeRewrite(this)
             prefs = TuningStore.prefs(this)
             Log.sync(this)
-            syncHookInverse()
+            syncHookFlags()
             prefs.registerOnSharedPreferenceChangeListener(prefsListener)
             registerKeyguardReceiver()
             registerLockStateListener()
@@ -1316,11 +1316,14 @@ class NowBarA11yService : AccessibilityService() {
         transitioning = true
         handler.postDelayed({ transitioning = false }, 200L)
         try {
-            // The strip keeps its pill on the lock screen: there it is the phone's status icons
+            // The strip keeps its pill on the lock screen, where it is the phone's status icons
             // (battery, network, Bluetooth), because the card at the bottom already carries the
-            // activity. It morphs into that form instead of being removed and put back.
+            // activity. It morphs into that form instead of being removed and put back. The
+            // clock-less left layout is the exception: there the keyguard keeps its own bar.
             val view = sbPill
-            if (view == null) {
+            if (!sbWantedOnLockScreen()) {
+                removeSbPill()
+            } else if (view == null) {
                 if (!sbHidden && TuningStore.isOn(this, TuningStore.MASTER)) {
                     addSbPill(fadeIn = true)
                 }
@@ -1794,6 +1797,12 @@ class NowBarA11yService : AccessibilityService() {
 
     private fun addSbPill(slideIn: Boolean = false, fadeIn: Boolean = false) {
         try {
+            // The clock-less left layout has no pill on the keyguard: that end of the strip is an
+            // unlocked arrangement, and the keyguard draws its own bar (clock and carrier too).
+            if (lastLocked == true && !sbWantedOnLockScreen()) {
+                Log.i("sb pill skipped: the clock-less left layout has none on the keyguard")
+                return
+            }
             // The bar came back while the pill was on its way out: catch it mid-flight and put it
             // back, instead of leaving it half-faded and then removing it once the animation ends.
             if (sbPill != null && sbLeavingWithBar) {
@@ -1858,6 +1867,7 @@ class NowBarA11yService : AccessibilityService() {
             // window draw once at full alpha, disappear, then fade back in - the flicker.
             if (fadeIn) lp.alpha = 0f
             view.setStyle(t.label, t.textDp, t.radiusDp)
+            view.setIdleContent(t.idleContent)
             view.setOutlineMode(TuningStore.outline(this))
             // The card is drawn inside the padded window, so the visible pill keeps its tuned size
             // while the window around it is the touch target.
@@ -1876,7 +1886,7 @@ class NowBarA11yService : AccessibilityService() {
             view.setItems(NowBarState.items(this).take(1), false, 0)
             // A short line gets a short pill: the tuned width is the maximum, not a fixed size.
             // Measured at the card's height, not the padded window's.
-            lp.width = view.preferredWidth(sbMaxWidthPx(), dp(t.heightDp))
+            lp.width = view.preferredWidth(sbMaxWidthPx(view), dp(t.heightDp))
             // The edge was worked out for the *tuned* width, and a right-anchored layout puts the
             // left edge where a pill that wide would start. Adding the narrower pill there left it
             // that many pixels short of its margin, and the next re-place snapped it back - the
@@ -1915,7 +1925,7 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val lp = sbParams ?: return
             // The shade and the status bar show the same pill: always fit the line.
-            val wanted = view.preferredWidth(sbMaxWidthPx(), dp(Tuning.sb(this).heightDp))
+            val wanted = view.preferredWidth(sbMaxWidthPx(view), dp(Tuning.sb(this).heightDp))
             if (lp.width == wanted && sbWidthAnimator?.isRunning != true) {
                 // The width is already right, but the position may still belong to a different
                 // one (a pill placed before its line was measured). Nothing would ever correct
@@ -1938,7 +1948,7 @@ class NowBarA11yService : AccessibilityService() {
             sbWidthAnimator?.cancel()
             val from = lp.width
             sbWidthTarget = wanted
-            Log.i("sb width morph: ${from}px -> ${wanted}px (max ${sbMaxWidthPx()}px)")
+            Log.i("sb width morph: ${from}px -> ${wanted}px (max ${sbMaxWidthPx(view)}px)")
             val anim = ValueAnimator.ofInt(from, wanted).apply {
                 duration = WIDTH_MS
                 interpolator = DecelerateInterpolator(1.4f)
@@ -1994,6 +2004,7 @@ class NowBarA11yService : AccessibilityService() {
             val t = Tuning.sb(this)
             // Style first, so the width is measured from the new label and text size, not the old.
             view.setStyle(t.label, t.textDp, t.radiusDp)
+            view.setIdleContent(t.idleContent)
             view.setOutlineMode(TuningStore.outline(this))
             view.setStatusGlyphs(
                 t.inverse,
@@ -2051,16 +2062,20 @@ class NowBarA11yService : AccessibilityService() {
     /**
      * Where the status pill's left edge goes.
      *
-     * Portrait, normal layout: the tuned left edge, or clear of the clock. Portrait inverse, and
-     * landscape in either layout: the pill occupies the right end of the strip (Android's battery /
-     * signal corner there too), so its left edge follows from its width and that orientation's
-     * right margin.
+     * Portrait, right-hand layout: the pill owns Android's battery / signal corner, so its left
+     * edge follows from its width and the right margin. Portrait, left after the clock: the tuned
+     * left edge, or clear of the time. Portrait, left with the clock hidden: the right-hand
+     * layout mirrored - the same width, height and margin, with that margin read from the left.
+     * Landscape keeps the right end in every layout, clock or no clock.
      */
     private fun sbXFor(widthPx: Int, t: Tuning.Sb): Int {
         if (isLandscape()) return rightAnchoredX(widthPx, sbRightMarginDp(t))
-        if (t.inverse) return rightAnchoredX(widthPx, t.rightMarginDp)
-        val left = t.leftDp
-        return if (left >= 0) dp(left) else autoSbLeft(widthPx)
+        return when (t.side) {
+            TuningStore.SB_SIDE_LEFT_NO_CLOCK -> dp(t.rightMarginDp)
+            TuningStore.SB_SIDE_LEFT ->
+                if (t.leftDp >= 0) dp(t.leftDp) else autoSbLeft(widthPx)
+            else -> rightAnchoredX(widthPx, t.rightMarginDp)
+        }
     }
 
     /** Landscape's right margin: its own value, or the portrait one when unset. */
@@ -2075,8 +2090,18 @@ class NowBarA11yService : AccessibilityService() {
      * How wide the pill may grow: the tuned width for this orientation. Landscape has its own width
      * (falling back to the portrait one), which is how it can take up a whole landscape strip
      * instead of being held to a status-bar-sized box.
+     *
+     * The idle clock is the one line allowed past that ceiling: a 106 dp pill cannot hold "5:11 PM"
+     * beside the battery and Wi-Fi glyphs, and a time trimmed to fit is wrong information rather
+     * than a shorter pill. It is measured against the strip instead, and the pill still shrinks to
+     * the line, so this only lets the clock be complete.
      */
-    private fun sbMaxWidthPx(): Int = sbWidthPx(Tuning.sb(this))
+    private fun sbMaxWidthPx(view: PillView? = null): Int {
+        val tuned = sbWidthPx(Tuning.sb(this))
+        if (view == null || !view.idleLineWantsRoom()) return tuned
+        val margin = dp(Tuning.sb(this).rightMarginDp)
+        return maxOf(tuned, screenWidthPx() - margin * 2)
+    }
 
     /** The width the pill is laid out at: portrait width, or the landscape override. */
     private fun sbWidthPx(t: Tuning.Sb): Int =
@@ -2215,6 +2240,13 @@ class NowBarA11yService : AccessibilityService() {
         val width = sbParams?.width ?: dp(t.widthDp)
         return sbXFor(width, t).coerceIn(0, (screenWidthPx() - width).coerceAtLeast(0))
     }
+
+    /**
+     * Whether the strip pill belongs on the keyguard. The clock-less left layout does not: it is
+     * the left end of an unlocked strip, and the keyguard draws its own bar (its own clock and
+     * carrier), so a pill there would be a second status bar over the first.
+     */
+    private fun sbWantedOnLockScreen(): Boolean = !TuningStore.sbClockHidden(this)
 
     /** Invisible room above and below the status pill's card, in pixels. */
     private fun sbTouchPadPx(): Int = dp(SB_TOUCH_PAD_DP)
@@ -3187,7 +3219,7 @@ class NowBarA11yService : AccessibilityService() {
     private fun applyAll() {
         // Before the master check: the watcher switch has to work with the pill switched off too.
         syncRootWatcher()
-        syncHookInverse()
+        syncHookFlags()
         syncStatusBarVisibility()
         if (!TuningStore.isOn(this, TuningStore.MASTER)) {
             removeAllSurfaces()
@@ -3207,6 +3239,8 @@ class NowBarA11yService : AccessibilityService() {
         }
         if (!TuningStore.isOn(this, TuningStore.MASTER)) {
             removeSbPill()
+        } else if (lastLocked == true && !sbWantedOnLockScreen()) {
+            removeSbPill()
         } else if (sbPill == null && lastLocked == false) {
             addSbPill(fadeIn = true)
         }
@@ -3218,22 +3252,35 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     /**
-     * Pushes the inverse layout to SystemUI. The placement itself comes from the prefs, but the
-     * hook owns hiding Android's icon cluster (and the privacy dot), so after a prefs rewrite the
-     * two have to agree without waiting for the settings toggle.
+     * Pushes the strip layout to SystemUI. The placement itself comes from the prefs, but the
+     * hook owns hiding Android's icon cluster and the privacy dot (right-hand layout) and the
+     * clock (clock-less left-hand layout), so after a prefs rewrite the two have to agree without
+     * waiting for the settings control.
      */
-    private fun syncHookInverse() {
+    private fun syncHookFlags() {
         try {
-            val want = if (TuningStore.sbInverse(this)) 1 else 0
-            val have = Settings.Global.getInt(contentResolver, NowBarHook.KEY_INVERSE, -1)
-            if (have == want) return
+            val side = TuningStore.sbSide(this)
+            val inverseWant = if (side == TuningStore.SB_SIDE_RIGHT) 1 else 0
+            val clockWant = if (side == TuningStore.SB_SIDE_LEFT_NO_CLOCK) 1 else 0
+            val inverseHave = Settings.Global.getInt(contentResolver, NowBarHook.KEY_INVERSE, -1)
+            val clockHave = Settings.Global.getInt(contentResolver, NowBarHook.KEY_HIDE_CLOCK, -1)
+            if (inverseHave == inverseWant && clockHave == clockWant) return
             Thread {
-                val out = RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $want")
-                if (out == null) Log.w("hook inverse sync: no root, flag left at $have")
+                if (inverseHave != inverseWant) {
+                    val out = RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $inverseWant")
+                    if (out == null) Log.w("hook flag sync: no root, inverse left at $inverseHave")
+                }
+                if (clockHave != clockWant) {
+                    val out = RootShell.run("settings put global ${NowBarHook.KEY_HIDE_CLOCK} $clockWant")
+                    if (out == null) Log.w("hook flag sync: no root, clock left at $clockHave")
+                }
             }.start()
-            Log.i("hook: ${NowBarHook.KEY_INVERSE} -> $want (was $have)")
+            Log.i(
+                "hook: ${NowBarHook.KEY_INVERSE} -> $inverseWant (was $inverseHave), " +
+                    "${NowBarHook.KEY_HIDE_CLOCK} -> $clockWant (was $clockHave)"
+            )
         } catch (t: Throwable) {
-            Log.w("hook inverse sync failed", t)
+            Log.w("hook flag sync failed", t)
         }
     }
 
@@ -3272,7 +3319,8 @@ class NowBarA11yService : AccessibilityService() {
                 }
                 // The status pill stays on the strip whatever the keyguard is doing: with nothing
                 // active it is the idle line, or on the lock screen just its own icons.
-                val keepSb = TuningStore.isOn(this, TuningStore.MASTER)
+                val keepSb = TuningStore.isOn(this, TuningStore.MASTER) &&
+                    !(lastLocked == true && !sbWantedOnLockScreen())
                 if (!keepSb) removeSbPill() else sbPill?.let { view ->
                     view.setStatusOnly(lastLocked == true)
                     view.setItems(emptyList(), false, 0)
@@ -3359,8 +3407,10 @@ class NowBarA11yService : AccessibilityService() {
         when (lastLocked) {
             true -> {
                 if (lockPill == null) addLockPill(fadeIn = true)
-                // The strip carries the phone's status icons on the lock screen too.
-                if (sbPill == null && !sbHidden) addSbPill(fadeIn = true)
+                // The strip carries the phone's status icons on the lock screen too - except in
+                // the clock-less left layout, where the keyguard's own bar is left alone.
+                if (!sbWantedOnLockScreen()) removeSbPill()
+                else if (sbPill == null && !sbHidden) addSbPill(fadeIn = true)
             }
             false -> if (sbPill == null) addSbPill(fadeIn = true)
             null -> Unit

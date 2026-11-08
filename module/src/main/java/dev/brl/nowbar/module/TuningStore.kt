@@ -121,6 +121,31 @@ object TuningStore {
 
     fun scrollText(context: Context): Boolean = isOn(context, SCROLL_TEXT)
 
+    /**
+     * What an idle status pill draws: the placeholder, the time, or the time followed by the
+     * placeholder. Only the idle line - a live card always shows its own title.
+     *
+     * `clock` and `clockThenLabel` are what make a clock-less strip workable: the pill can be the
+     * clock instead of sitting next to one. The time is drawn with the pill's own text paint, so it
+     * matches the placeholder's size and weight.
+     */
+    const val IDLE_CONTENT = "idleContent"
+    const val IDLE_CONTENT_LABEL = "label"
+    const val IDLE_CONTENT_CLOCK = "clock"
+    const val IDLE_CONTENT_CLOCK_THEN_LABEL = "clockThenLabel"
+
+    /** The owner's choice on the device: the time, then the placeholder after it. */
+    const val DEFAULT_IDLE_CONTENT = IDLE_CONTENT_CLOCK_THEN_LABEL
+
+    fun idleContent(context: Context): String = try {
+        when (val raw = prefs(context).getString(IDLE_CONTENT, DEFAULT_IDLE_CONTENT)) {
+            IDLE_CONTENT_LABEL, IDLE_CONTENT_CLOCK, IDLE_CONTENT_CLOCK_THEN_LABEL -> raw
+            else -> DEFAULT_IDLE_CONTENT
+        }
+    } catch (t: Throwable) {
+        DEFAULT_IDLE_CONTENT
+    }
+
     const val DEFAULT_STACK_PEEK_DP = 22
 
     fun artTintStrength(context: Context): Int {
@@ -180,12 +205,14 @@ object TuningStore {
     const val DEFAULT_TEXT_DP = 21
     const val DEFAULT_RADIUS_DP = 40
     const val DEFAULT_BOTTOM_DP = 150
-    const val DEFAULT_LABEL = "Now Bar"
+
+    /** The owner's own idle line, taken from the phone's dialled-in config. */
+    const val DEFAULT_LABEL = ":)"
 
     // Status bar pill (unlocked). It sits where the notification icons live and hides them:
     // left edge just past the clock, right edge stopping short of the camera cutout.
     // Left/top of -1 mean "place it automatically" (right of the cutout, centred vertically).
-    const val DEFAULT_SB_WIDTH_DP = 106
+    const val DEFAULT_SB_WIDTH_DP = 160
     const val DEFAULT_SB_HEIGHT_DP = 27
     const val DEFAULT_SB_TEXT_DP = 13
     const val DEFAULT_SB_RADIUS_DP = 19
@@ -223,32 +250,51 @@ object TuningStore {
     }
 
     /**
-     * The inverse layout (issue #10): the status pill sits at the right end of the strip, where
-     * Android draws its battery and network icons. The hook hides that cluster, brings the
-     * notification icons back, and the pill draws its own battery and signal glyphs. The expanded
-     * card grows out of the pill's left edge, because the pill now ends at the screen edge.
+     * Which end of the strip the status pill takes.
+     *
+     *  - [SB_SIDE_RIGHT]: Android's battery / network corner (the inverse layout, issue #10). The
+     *    hook hides that cluster and the privacy dot, brings the notification icons back, and the
+     *    pill draws its own battery and signal glyphs. The expanded card opens centred.
+     *  - [SB_SIDE_LEFT]: the left end, just past the clock, over the notification icons.
+     *  - [SB_SIDE_LEFT_NO_CLOCK]: the same left end with Android's clock hidden, so the pill has
+     *    the whole of that side. The numbers are the right-hand layout's, with the right margin
+     *    read as a left margin - one set of measurements for both sides.
+     *
+     * Portrait only for the third: landscape stays right-anchored, clock and all.
      */
-    const val SB_INVERSE = "sbInverse"
+    const val SB_SIDE = "sbSide"
+    const val SB_SIDE_RIGHT = "right"
+    const val SB_SIDE_LEFT = "left"
+    const val SB_SIDE_LEFT_NO_CLOCK = "leftNoClock"
 
-    /**
-     * The new build puts the status pill at the right end by default: it owns Android's battery /
-     * network corner and draws those glyphs itself, instead of covering the notification icons.
-     */
-    const val DEFAULT_SB_INVERSE = true
+    /** The owner's own placement: the left side with the bar's clock off. */
+    const val DEFAULT_SB_SIDE = SB_SIDE_LEFT_NO_CLOCK
 
-    fun sbInverse(context: Context): Boolean = try {
-        prefs(context).getBoolean(SB_INVERSE, DEFAULT_SB_INVERSE)
+    fun sbSide(context: Context): String = try {
+        when (val raw = prefs(context).getString(SB_SIDE, DEFAULT_SB_SIDE)) {
+            SB_SIDE_RIGHT, SB_SIDE_LEFT, SB_SIDE_LEFT_NO_CLOCK -> raw
+            else -> DEFAULT_SB_SIDE
+        }
     } catch (t: Throwable) {
-        DEFAULT_SB_INVERSE
+        DEFAULT_SB_SIDE
     }
 
+    /** True while the pill owns Android's right-hand battery / network corner. */
+    fun sbInverse(context: Context): Boolean = sbSide(context) == SB_SIDE_RIGHT
+
+    /** True while Android's clock is hidden to give the pill the left end of the strip. */
+    fun sbClockHidden(context: Context): Boolean = sbSide(context) == SB_SIDE_LEFT_NO_CLOCK
+
     /**
-     * Order of the inverse pill's trailing glyphs. "battery,signal" (the default) keeps the
-     * battery closest to the edge, "signal,battery" swaps them.
+     * Order of the right-hand pill's trailing glyphs. "signal,battery" (the default) keeps the
+     * battery closest to the edge with the signal leading; the other way round swaps them.
      */
     const val STATUS_ICON_ORDER = "statusIconOrder"
-    const val DEFAULT_STATUS_ICON_ORDER = "battery,signal"
+    const val STATUS_ICON_ORDER_BATTERY_FIRST = "battery,signal"
     const val STATUS_ICON_ORDER_SIGNAL_FIRST = "signal,battery"
+
+    /** The owner's own order: the signal leads, the battery sits closest to the edge. */
+    const val DEFAULT_STATUS_ICON_ORDER = STATUS_ICON_ORDER_SIGNAL_FIRST
 
     fun statusSignalFirst(context: Context): Boolean = try {
         prefs(context).getString(STATUS_ICON_ORDER, DEFAULT_STATUS_ICON_ORDER) ==
@@ -258,12 +304,12 @@ object TuningStore {
     }
 
     /**
-     * Gap between the inverse pill and the right edge of the strip. The right edge is the fixed
-     * one in that layout (the left edge follows from the width), so this replaces the left-edge
-     * setting: a left value cannot place a pill that is anchored on the right.
+     * Gap between the pill and the fixed edge of the strip: the right edge in the right-hand
+     * layout (the left edge follows from the width), and the left edge in the clock-less left-hand
+     * layout. One number, read from whichever edge that layout anchors to.
      */
     const val SB_RIGHT_MARGIN = "sbRightDp"
-    const val DEFAULT_SB_RIGHT_MARGIN_DP = 10
+    const val DEFAULT_SB_RIGHT_MARGIN_DP = 20
 
     fun sbRightMarginDp(context: Context): Int = try {
         prefs(context).getInt(SB_RIGHT_MARGIN, DEFAULT_SB_RIGHT_MARGIN_DP).coerceIn(0, 200)
@@ -308,7 +354,7 @@ object TuningStore {
      * written by an older build, so geometry dialled in for the old layout cannot leave the new
      * one half-configured (that is how the pill kept a left-edge value after moving to the right).
      */
-    const val CONFIG_VERSION = 4
+    const val CONFIG_VERSION = 6
     private const val CONFIG_VERSION_KEY = "configVersion"
 
     /** Rewrites the whole tuning file when it was written by an older build. */
@@ -358,8 +404,9 @@ object TuningStore {
         e.putBoolean(AOD_GRAY, true)
         e.putBoolean(AOD_LINE_STYLE, true)
         e.putBoolean(SCROLL_TEXT, true)
-        e.putBoolean(SB_INVERSE, DEFAULT_SB_INVERSE)
         e.putBoolean(OUTLINE, DEFAULT_OUTLINE)
+        e.putString(SB_SIDE, DEFAULT_SB_SIDE)
+        e.putString(IDLE_CONTENT, DEFAULT_IDLE_CONTENT)
 
         // Cards and the stack.
         e.putString(RANK_ORDER, DEFAULT_RANK_ORDER)

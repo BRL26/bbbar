@@ -31,14 +31,22 @@ object Tuning {
         val rightMarginLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_RIGHT_DP,
         val topLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
         /**
+         * Which end of the strip the pill takes: [TuningStore.SB_SIDE_RIGHT],
+         * [TuningStore.SB_SIDE_LEFT] or [TuningStore.SB_SIDE_LEFT_NO_CLOCK].
+         */
+        val side: String = TuningStore.DEFAULT_SB_SIDE,
+        /**
          * Right end of the strip instead of the left: the pill covers Android's battery and
          * network icons (hidden by the hook), draws its own, and its card opens centred.
          */
-        val inverse: Boolean = TuningStore.DEFAULT_SB_INVERSE,
-        /** Gap to the right edge in inverse mode, where that edge is the fixed one. */
+        val inverse: Boolean = TuningStore.DEFAULT_SB_SIDE == TuningStore.SB_SIDE_RIGHT,
+        /** Gap to the fixed edge of the strip: its right in the inverse layout, its left when
+         *  the clock is hidden. */
         val rightMarginDp: Int = TuningStore.DEFAULT_SB_RIGHT_MARGIN_DP,
         /** Battery before signal (default) or the other way round. */
         val signalFirst: Boolean = false,
+        /** What the idle line says: placeholder, clock, or clock then placeholder. */
+        val idleContent: String = TuningStore.DEFAULT_IDLE_CONTENT,
         val label: String = TuningStore.DEFAULT_LABEL
     )
 
@@ -95,9 +103,11 @@ object Tuning {
                 "sbLandscapeTopDp",
                 TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP
             ),
+            side = TuningStore.sbSide(context),
             inverse = TuningStore.sbInverse(context),
             rightMarginDp = TuningStore.sbRightMarginDp(context),
             signalFirst = TuningStore.statusSignalFirst(context),
+            idleContent = TuningStore.idleContent(context),
             label = p.getString("label", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
         )
     }

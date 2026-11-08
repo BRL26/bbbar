@@ -146,6 +146,32 @@ new title, a timer appearing or the card going away reads as the same shape stre
 that arrives mid-morph retargets from the width on screen; a settings change keeps the current
 width for its first frame, so the pill never flashes wide.
 
+## Inverse layout and measure mode
+
+**Inverse: pill at the right end** is on by default and moves the status pill out of the
+notification icons and into Android's battery / network corner. The hook hides `system_icon_area`
+and puts the notification icons back; the pill draws its own battery and signal glyphs from the
+signal level SystemUI publishes, keeps the right edge fixed (with a configurable `sbRightDp`
+margin) and grows its expanded card leftwards. Which glyph leads is a setting (`statusIconOrder`,
+battery first by default). Turning inverse off switches the settings page back to a left-edge
+control and a left-aligned preview.
+
+The camera / microphone privacy indicator lives in that same corner, and its own window is above
+the overlay, so it would sit on top of the pill. While inverse is on the hook hides it with the
+rest of the cluster (`privacy_chip_container`, or any `*Privacy*` view on a build that places it
+elsewhere), and restores it untouched when inverse is off.
+
+**Measure mode (outline only)** (Look → Surfaces) draws every surface as an empty outline: no
+text, artwork, progress or glyphs, and the surfaces stay up with nothing active. It is for setting
+sizes, edges and radii against the real screen instead of the preview. It can also be toggled over
+adb with `--ez outlineMode true`.
+
+The stored configuration is versioned (`configVersion`). A file written by an older build is
+**rewritten from this build's complete defaults** on the next process start, so geometry dialled
+in for the old layout cannot leave the new one half-configured. The status pill's numbers are also
+clamped to what the strip can hold (40–1000 × 12–96 dp), so a stale slider extreme cannot make it
+cover the screen.
+
 ## Unlock/lock detection
 
 `KeyguardManager.addKeyguardLockedStateListener` throws on this build. Detection therefore stacks:

@@ -34,6 +34,15 @@ object Tuning {
         val shadeTopDp: Int = TuningStore.DEFAULT_SB_SHADE_TOP_DP,
         /** Fixed width in the shade; 0 means "fit the line", as before the setting existed. */
         val shadeWidthDp: Int = TuningStore.DEFAULT_SB_SHADE_WIDTH_DP,
+        /**
+         * Right end of the strip instead of the left: the pill covers Android's battery and
+         * network icons (hidden by the hook), draws its own, and its card grows leftwards.
+         */
+        val inverse: Boolean = TuningStore.DEFAULT_SB_INVERSE,
+        /** Gap to the right edge in inverse mode, where that edge is the fixed one. */
+        val rightMarginDp: Int = TuningStore.DEFAULT_SB_RIGHT_MARGIN_DP,
+        /** Battery before signal (default) or the other way round. */
+        val signalFirst: Boolean = false,
         val label: String = TuningStore.DEFAULT_LABEL
     )
 
@@ -68,11 +77,13 @@ object Tuning {
 
     fun sb(context: Context): Sb {
         val p = TuningStore.prefs(context)
+        // A stale or extreme slider value must not turn a strip pill into a full-screen one:
+        // these are the numbers the strip can actually hold.
         return Sb(
-            widthDp = p.getInt("sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP),
-            heightDp = p.getInt("sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP),
-            textDp = p.getInt("sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP),
-            radiusDp = p.getInt("sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP),
+            widthDp = p.getInt("sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP).coerceIn(40, 1000),
+            heightDp = p.getInt("sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP).coerceIn(12, 96),
+            textDp = p.getInt("sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP).coerceIn(6, 40),
+            radiusDp = p.getInt("sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP).coerceIn(0, 200),
             leftDp = p.getInt("sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP),
             topDp = p.getInt("sbTopDp", TuningStore.DEFAULT_SB_TOP_DP),
             leftLandscapeDp = p.getInt(
@@ -86,6 +97,9 @@ object Tuning {
             shadeLeftDp = p.getInt("sbShadeLeftDp", TuningStore.DEFAULT_SB_SHADE_LEFT_DP),
             shadeTopDp = p.getInt("sbShadeTopDp", TuningStore.DEFAULT_SB_SHADE_TOP_DP),
             shadeWidthDp = p.getInt("sbShadeWidthDp", TuningStore.DEFAULT_SB_SHADE_WIDTH_DP),
+            inverse = TuningStore.sbInverse(context),
+            rightMarginDp = TuningStore.sbRightMarginDp(context),
+            signalFirst = TuningStore.statusSignalFirst(context),
             label = p.getString("label", TuningStore.DEFAULT_LABEL) ?: TuningStore.DEFAULT_LABEL
         )
     }

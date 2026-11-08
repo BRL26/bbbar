@@ -205,6 +205,69 @@ object TuningStore {
     const val DEFAULT_SB_LANDSCAPE_LEFT_DP = -1
     const val DEFAULT_SB_LANDSCAPE_TOP_DP = -1
 
+    /**
+     * The inverse layout (issue #10): the status pill sits at the right end of the strip, where
+     * Android draws its battery and network icons. The hook hides that cluster, brings the
+     * notification icons back, and the pill draws its own battery and signal glyphs. The expanded
+     * card grows out of the pill's left edge, because the pill now ends at the screen edge.
+     */
+    const val SB_INVERSE = "sbInverse"
+
+    /**
+     * The new build puts the status pill at the right end by default: it owns Android's battery /
+     * network corner and draws those glyphs itself, instead of covering the notification icons.
+     */
+    const val DEFAULT_SB_INVERSE = true
+
+    fun sbInverse(context: Context): Boolean = try {
+        prefs(context).getBoolean(SB_INVERSE, DEFAULT_SB_INVERSE)
+    } catch (t: Throwable) {
+        DEFAULT_SB_INVERSE
+    }
+
+    /**
+     * Order of the inverse pill's trailing glyphs. "battery,signal" (the default) keeps the
+     * battery closest to the edge, "signal,battery" swaps them.
+     */
+    const val STATUS_ICON_ORDER = "statusIconOrder"
+    const val DEFAULT_STATUS_ICON_ORDER = "battery,signal"
+    const val STATUS_ICON_ORDER_SIGNAL_FIRST = "signal,battery"
+
+    fun statusSignalFirst(context: Context): Boolean = try {
+        prefs(context).getString(STATUS_ICON_ORDER, DEFAULT_STATUS_ICON_ORDER) ==
+            STATUS_ICON_ORDER_SIGNAL_FIRST
+    } catch (t: Throwable) {
+        false
+    }
+
+    /**
+     * Gap between the inverse pill and the right edge of the strip. The right edge is the fixed
+     * one in that layout (the left edge follows from the width), so this replaces the left-edge
+     * setting: a left value cannot place a pill that is anchored on the right.
+     */
+    const val SB_RIGHT_MARGIN = "sbRightDp"
+    const val DEFAULT_SB_RIGHT_MARGIN_DP = 10
+
+    fun sbRightMarginDp(context: Context): Int = try {
+        prefs(context).getInt(SB_RIGHT_MARGIN, DEFAULT_SB_RIGHT_MARGIN_DP).coerceIn(0, 200)
+    } catch (t: Throwable) {
+        DEFAULT_SB_RIGHT_MARGIN_DP
+    }
+
+    /**
+     * Measure mode: every surface is drawn as an empty outline with no content, and a surface
+     * stays up even with nothing active, so sizes, edges and corner radii can be dialled in
+     * against the real screen instead of a preview.
+     */
+    const val OUTLINE = "outlineMode"
+    const val DEFAULT_OUTLINE = false
+
+    fun outline(context: Context): Boolean = try {
+        prefs(context).getBoolean(OUTLINE, DEFAULT_OUTLINE)
+    } catch (t: Throwable) {
+        DEFAULT_OUTLINE
+    }
+
     // Expanded popup (third surface), opened by tapping the status bar pill. It carries the
     // detail and controls; the status bar pill itself stays text + image only.
     const val DEFAULT_POPUP_WIDTH_DP = 393
@@ -222,4 +285,114 @@ object TuningStore {
 
     fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * Bumped whenever the stored configuration changes shape. The rewrite below replaces a file
+     * written by an older build, so geometry dialled in for the old layout cannot leave the new
+     * one half-configured (that is how the pill kept a left-edge value after moving to the right).
+     */
+    const val CONFIG_VERSION = 3
+    private const val CONFIG_VERSION_KEY = "configVersion"
+
+    /** Rewrites the whole tuning file when it was written by an older build. */
+    fun maybeRewrite(context: Context) {
+        try {
+            val p = prefs(context)
+            Log.i(
+                "prefs: version=${p.getInt(CONFIG_VERSION_KEY, 0)} keys=${p.all.size} " +
+                    "dir=${context.dataDir}"
+            )
+            if (p.getInt(CONFIG_VERSION_KEY, 0) >= CONFIG_VERSION) return
+            rewrite(p)
+            Log.i("prefs: rewritten for build config $CONFIG_VERSION")
+        } catch (t: Throwable) {
+            Log.w("prefs rewrite failed", t)
+        }
+    }
+
+    /** The reset button: one complete file of this build's defaults, not an empty one. */
+    fun rewriteDefaults(context: Context) {
+        try {
+            rewrite(prefs(context))
+            Log.i("prefs: reset to build config $CONFIG_VERSION")
+        } catch (t: Throwable) {
+            Log.w("prefs reset failed", t)
+        }
+    }
+
+    /**
+     * Every setting this build reads, written explicitly. Keeping the whole set here means the
+     * file says what the build is configured to do, and a default read never has to fall back.
+     */
+    private fun rewrite(p: SharedPreferences) {
+        val e = p.edit().clear()
+        e.putInt(CONFIG_VERSION_KEY, CONFIG_VERSION)
+
+        // Switches.
+        e.putBoolean(MASTER, true)
+        e.putBoolean(SURFACE_LOCK, true)
+        e.putBoolean(SURFACE_STATUS, true)
+        e.putBoolean(SURFACE_POPUP, true)
+        e.putBoolean(FEATURE_MEDIA, true)
+        e.putBoolean(FEATURE_TIMERS, true)
+        e.putBoolean(FEATURE_ALARM, true)
+        e.putBoolean(FEATURE_LIVE, true)
+        e.putBoolean(ROOT_WATCHER, true)
+        e.putBoolean(AOD_GRAY, true)
+        e.putBoolean(AOD_LINE_STYLE, true)
+        e.putBoolean(SCROLL_TEXT, true)
+        e.putBoolean(SB_INVERSE, DEFAULT_SB_INVERSE)
+        e.putBoolean(OUTLINE, DEFAULT_OUTLINE)
+
+        // Cards and the stack.
+        e.putString(RANK_ORDER, DEFAULT_RANK_ORDER)
+        e.putString(ART_MODE, "both")
+        e.putString(ART_TINT, "system")
+        e.putInt(STACK_PEEK, DEFAULT_STACK_PEEK_DP)
+        e.putInt(BLUR_STRENGTH, 3)
+        e.putInt(ART_TINT_STRENGTH, 55)
+        e.putString(LABEL, DEFAULT_LABEL)
+        e.putInt(DEBUG_LEVEL, 1)
+
+        // Lockscreen pill.
+        e.putInt("widthDp", DEFAULT_WIDTH_DP)
+        e.putInt("heightDp", DEFAULT_HEIGHT_DP)
+        e.putInt("textDp", DEFAULT_TEXT_DP)
+        e.putInt("radiusDp", DEFAULT_RADIUS_DP)
+        e.putInt("bottomDp", DEFAULT_BOTTOM_DP)
+
+        // Status bar pill, both layouts.
+        e.putInt("sbWidthDp", DEFAULT_SB_WIDTH_DP)
+        e.putInt("sbHeightDp", DEFAULT_SB_HEIGHT_DP)
+        e.putInt("sbTextDp", DEFAULT_SB_TEXT_DP)
+        e.putInt("sbRadiusDp", DEFAULT_SB_RADIUS_DP)
+        e.putInt("sbLeftDp", DEFAULT_SB_LEFT_DP)
+        e.putInt("sbTopDp", DEFAULT_SB_TOP_DP)
+        e.putInt("sbLandscapeLeftDp", DEFAULT_SB_LANDSCAPE_LEFT_DP)
+        e.putInt("sbLandscapeTopDp", DEFAULT_SB_LANDSCAPE_TOP_DP)
+        e.putInt(SB_SHADE_LEFT, DEFAULT_SB_SHADE_LEFT_DP)
+        e.putInt(SB_SHADE_TOP, DEFAULT_SB_SHADE_TOP_DP)
+        e.putInt(SB_SHADE_WIDTH, DEFAULT_SB_SHADE_WIDTH_DP)
+        e.putString(STATUS_ICON_ORDER, DEFAULT_STATUS_ICON_ORDER)
+        e.putInt(SB_RIGHT_MARGIN, DEFAULT_SB_RIGHT_MARGIN_DP)
+
+        // Expanded card.
+        e.putInt("popupWidthDp", DEFAULT_POPUP_WIDTH_DP)
+        e.putInt("popupHeightDp", DEFAULT_POPUP_HEIGHT_DP)
+        e.putInt("popupTextDp", DEFAULT_POPUP_TEXT_DP)
+        e.putInt("popupRadiusDp", DEFAULT_POPUP_RADIUS_DP)
+        e.putInt("popupLeftDp", DEFAULT_POPUP_LEFT_DP)
+        e.putInt("popupTopDp", DEFAULT_POPUP_TOP_DP)
+        e.putInt("popupLandscapeTopDp", DEFAULT_POPUP_LANDSCAPE_TOP_DP)
+        e.putString("popupLabel", DEFAULT_LABEL)
+
+        // AOD lattice.
+        e.putInt(AOD_DOT_CELL, DEFAULT_AOD_DOT_CELL_DP)
+        e.putInt(AOD_DOT_SIZE, DEFAULT_AOD_DOT_SIZE_DP)
+
+        // Synchronous on purpose: this runs once, at startup, and the caller wants to know the
+        // file actually landed instead of guessing from an async apply().
+        val ok = e.commit()
+        Log.i("prefs: wrote ${p.all.size} keys (commit=$ok)")
+    }
 }

@@ -78,6 +78,9 @@ class PillView(context: Context) : View(context) {
         /** However unclear the direction, the guess is made once the finger has gone this far. */
         private const val DRAG_FORCE_LOCK_DP = 26f
 
+        /** Gap between the line and the trailing battery / cellular cluster, in dp. */
+        private const val STATUS_CLUSTER_GAP_DP = 7f
+
         /** How far the card gives while the direction is still unknown. */
         private const val DRAG_GIVE_DP = 16f
 
@@ -105,6 +108,19 @@ class PillView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
     }
     private val glyphFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
+    /**
+     * The inverse pill's own battery and signal glyphs (issue #10). They are painted with their own
+     * paints so setting a stroke style here can never leak into the card's other glyphs.
+     */
+    private val statusStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = dp(1.2f)
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val statusFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val statusDim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val scrim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val tintLayer = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
@@ -244,6 +260,16 @@ class PillView(context: Context) : View(context) {
         strokeWidth = dp(1.4f)
     }
 
+    /**
+     * True when this pill owns the right end of the strip and must draw the battery and signal
+     * icons Android's own cluster used to show. Set only on the status bar pill in inverse mode.
+     */
+    private var statusGlyphs = false
+    private var batteryPct = -1
+    private var signalLevel = -1
+    /** Custom icon order: false = battery then signal, true = signal then battery. */
+    private var statusSignalFirst = false
+
     /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
     private var gray = 0f
     private var grayAnimator: ValueAnimator? = null
@@ -303,6 +329,9 @@ class PillView(context: Context) : View(context) {
      */
     fun preferredWidth(maxWidthPx: Int, heightPx: Int): Int {
         return try {
+            // Measure mode shows the tuned shape, not the line: fitting it to the label would
+            // hide the width that is being dialled in.
+            if (outlineOnly) return maxWidthPx
             val h = heightPx.toFloat()
             if (h <= 0f) return maxWidthPx
             val r = minOf(dp(radiusOverrideDp), h / 2f)
@@ -326,12 +355,18 @@ class PillView(context: Context) : View(context) {
                 item.art != null -> glyphSize + dp(9f)
                 else -> 0f
             }
-            val wanted = pad + iconW + textW + pad + dp(1f)
+            val clusterW = if (statusGlyphs) {
+                statusClusterWidth(h) + dp(STATUS_CLUSTER_GAP_DP)
+            } else {
+                0f
+            }
+            val wanted = pad + iconW + textW + clusterW + pad + dp(1f)
             // A line that does not fit keeps the tuned width: it scrolls inside it. Shrinking
             // there would leave a tiny pill scrolling a long line, which is the one thing this
-            // is not for. A line that does fit shrinks the pill down to it, as far as a circle.
+            // is not for. A line that does fit shrinks the pill down to it, as far as a circle -
+            // but never so far that the trailing battery/signal cluster is cut.
             if (wanted >= maxWidthPx) return maxWidthPx
-            val minW = heightPx.coerceAtMost(maxWidthPx)
+            val minW = maxOf(heightPx, (pad * 2f + clusterW).toInt()).coerceAtMost(maxWidthPx)
             wanted.toInt().coerceIn(minW, maxWidthPx)
         } catch (t: Throwable) {
             Log.w("PillView.preferredWidth failed", t)
@@ -347,6 +382,8 @@ class PillView(context: Context) : View(context) {
     fun preferredHeight(maxHeightPx: Int): Int {
         return try {
             if (maxHeightPx <= 0) return maxHeightPx
+            // Measure mode keeps the full tuned height, even for a one-line card.
+            if (outlineOnly) return maxHeightPx
             val item = frontItem ?: return maxHeightPx
             val h = maxHeightPx.toFloat()
             val r = minOf(if (radiusOverrideDp > 0f) dp(radiusOverrideDp) else h / 2f, h / 2f)
@@ -368,6 +405,13 @@ class PillView(context: Context) : View(context) {
             maxHeightPx
         }
     }
+
+    /**
+     * Measure mode: draw only the card's outline - no fill, artwork, text, glyphs or progress -
+     * so the size and place the settings dial in can be judged on the real screen. The surfaces
+     * stay up with nothing active, because the shape is the whole point there.
+     */
+    var outlineOnly = false
 
     /** Switches the AOD look on or off. The service sets it with the display, not with the theme. */
     fun setLineStyle(on: Boolean) {
@@ -409,6 +453,113 @@ class PillView(context: Context) : View(context) {
     }
 
     /**
+     * The inverse layout's own battery and signal glyphs: on when the pill sits over Android's
+     * system icon cluster, with the values that cluster used to show. -1 means "unknown", which
+     * draws an empty battery / empty bars rather than nothing at all.
+     */
+    fun setStatusGlyphs(on: Boolean, battery: Int, signal: Int, signalFirst: Boolean = false) {
+        try {
+            val b = battery.coerceIn(-1, 100)
+            val s = signal.coerceIn(-1, 4)
+            if (on == statusGlyphs && b == batteryPct && s == signalLevel &&
+                signalFirst == statusSignalFirst
+            ) {
+                return
+            }
+            statusGlyphs = on
+            batteryPct = b
+            signalLevel = s
+            statusSignalFirst = signalFirst
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setStatusGlyphs threw", t)
+        }
+    }
+
+    /** Applies the measure-mode outline (see [outlineOnly]). */
+    fun setOutlineMode(on: Boolean) {
+        try {
+            if (outlineOnly == on) return
+            outlineOnly = on
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setOutlineMode threw", t)
+        }
+    }
+
+    /** Height of the trailing glyphs: small enough to fit the 27 dp status pill. */
+    private fun statusIconHeight(cardH: Float): Float =
+        (cardH * 0.44f).coerceIn(dp(7f), dp(13f))
+
+    /** Width the battery + gap + signal cluster takes, for fitting the pill to its line. */
+    private fun statusClusterWidth(cardH: Float): Float {
+        val iconH = statusIconHeight(cardH)
+        return iconH * 1.5f + (iconH * 0.4f).coerceAtLeast(dp(2f)) + iconH * 0.95f
+    }
+
+    /** A battery outline with the charge inside it, ending in a small nub. */
+    private fun drawBattery(canvas: Canvas, area: RectF, pct: Int) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            statusStroke.strokeWidth = (area.height() * 0.11f).coerceAtLeast(dp(0.9f))
+            val nubW = (area.height() * 0.16f).coerceAtLeast(dp(1.2f))
+            val radius = area.height() * 0.24f
+            val body = RectF(area.left, area.top, area.right - nubW - dp(0.5f), area.bottom)
+            canvas.drawRoundRect(body, radius, radius, statusStroke)
+            val nubTop = area.centerY() - area.height() * 0.21f
+            val nubBottom = area.centerY() + area.height() * 0.21f
+            canvas.drawRoundRect(
+                RectF(body.right + dp(0.5f), nubTop, area.right, nubBottom),
+                dp(0.6f),
+                dp(0.6f),
+                statusFill
+            )
+            if (pct >= 0) {
+                val inset = body.height() * 0.24f
+                val innerW = (body.width() - inset * 2f).coerceAtLeast(0f)
+                val fillW = innerW * (pct.coerceIn(0, 100) / 100f)
+                if (fillW > 0.5f) {
+                    val r = (radius * 0.6f).coerceAtLeast(0.5f)
+                    canvas.drawRoundRect(
+                        RectF(
+                            body.left + inset,
+                            body.top + inset,
+                            body.left + inset + fillW,
+                            body.bottom - inset
+                        ),
+                        r,
+                        r,
+                        statusFill
+                    )
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("PillView battery glyph failed", t)
+        }
+    }
+
+    /** Four rising bars, the filled ones showing [level]; -1 draws all of them dimmed. */
+    private fun drawCellular(canvas: Canvas, area: RectF, level: Int) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            val bars = 4
+            val gap = area.width() * 0.12f
+            val barW = ((area.width() - gap * (bars - 1)) / bars).coerceAtLeast(dp(1f))
+            val lit = if (level < 0) 0 else (level + 1).coerceIn(0, bars)
+            for (i in 0 until bars) {
+                val fraction = 0.34f + 0.66f * (i.toFloat() / (bars - 1))
+                val barH = area.height() * fraction
+                val left = area.left + i * (barW + gap)
+                val rect = RectF(left, area.bottom - barH, left + barW, area.bottom)
+                val r = barW * 0.34f
+                canvas.drawRoundRect(rect, r, r, if (i < lit) statusFill else statusDim)
+            }
+        } catch (t: Throwable) {
+            Log.w("PillView cellular glyph failed", t)
+        }
+    }
+
+    /**
      * Colours come from Material colour roles: surface-variant for the card, on-surface for text
      * and glyphs, primary for the progress fill, outline for the hairline.
      */
@@ -417,15 +568,32 @@ class PillView(context: Context) : View(context) {
             val surface = attrColor(com.google.android.material.R.attr.colorSurfaceVariant, Color.parseColor("#FF111117"))
             val onSurface = attrColor(com.google.android.material.R.attr.colorOnSurface, Color.WHITE)
             val primary = attrColor(androidx.appcompat.R.attr.colorPrimary, Color.WHITE)
-            fill.color = surface
-            stackFill.color = attrColor(com.google.android.material.R.attr.colorSurface, surface)
-            stroke.color = withAlpha(attrColor(com.google.android.material.R.attr.colorOutline, onSurface), 0x40)
+            // Material 3 roles: cards sit on a tonal surface container, the outline is the
+            // scheme's own outline colour, and progress uses primary on secondary-container.
+            fill.color = attrColor(
+                com.google.android.material.R.attr.colorSurfaceContainer,
+                attrColor(com.google.android.material.R.attr.colorSurface, surface)
+            )
+            stackFill.color = attrColor(
+                com.google.android.material.R.attr.colorSurfaceContainerHigh,
+                attrColor(com.google.android.material.R.attr.colorSurfaceVariant, surface)
+            )
+            stroke.color = withAlpha(
+                attrColor(com.google.android.material.R.attr.colorOutline, onSurface),
+                0x59
+            )
             titlePaint.color = onSurface
             subtitlePaint.color = withAlpha(onSurface, 0xB3)
-            progressTrack.color = withAlpha(onSurface, 0x33)
+            progressTrack.color = withAlpha(
+                attrColor(com.google.android.material.R.attr.colorSecondaryContainer, onSurface),
+                0x80
+            )
             progressFill.color = primary
             glyph.color = onSurface
             glyphFill.color = onSurface
+            statusStroke.color = onSurface
+            statusFill.color = onSurface
+            statusDim.color = withAlpha(onSurface, 0x3D)
             tintLayer.color = withAlpha(primary, 0x8C)
             scrim.color = withAlpha(surface, 0xCC)
         } catch (t: Throwable) {
@@ -642,6 +810,11 @@ class PillView(context: Context) : View(context) {
                     if (bottom - top < dp(6f)) continue
                     backCard.set(dp(1f), top, width.toFloat() - dp(1f), bottom)
                     val backRadius = minOf(radius, (bottom - top) / 2f)
+                    if (outlineOnly) {
+                        outline.color = titlePaint.color
+                        canvas.drawRoundRect(backCard, backRadius, backRadius, outline)
+                        continue
+                    }
                     canvas.drawRoundRect(backCard, backRadius, backRadius, stackFill)
                     canvas.drawRoundRect(backCard, backRadius, backRadius, stroke)
 
@@ -680,6 +853,13 @@ class PillView(context: Context) : View(context) {
         val h = area.height()
         if (w <= 0f || h <= 0f) return
         val r = minOf(radius, h / 2f)
+
+        // Measure mode: the shape, and nothing inside it.
+        if (outlineOnly) {
+            outline.color = titlePaint.color
+            canvas.drawRoundRect(area, r, r, outline)
+            return
+        }
 
         // The idle line is the label itself; a blank label means the owner has nothing to say,
         // so the card is not drawn at all rather than left as an empty shape.
@@ -800,6 +980,37 @@ class PillView(context: Context) : View(context) {
                 }
             }
             textRight = left - dp(8f)
+        }
+
+        // The inverse pill owns the end of the strip, so it draws the battery and signal icons
+        // Android's cluster used to: right-aligned, then the line gets whatever is left.
+        if (statusGlyphs) {
+            val iconH = statusIconHeight(h)
+            val batteryW = iconH * 1.5f
+            val signalW = iconH * 0.95f
+            val gap = (iconH * 0.4f).coerceAtLeast(dp(2f))
+            val right = w - pad
+            val left = right - batteryW - gap - signalW
+            val top = (h - iconH) / 2f
+            // Which glyph leads is the owner's choice: the two swap places, the cluster does not.
+            if (statusSignalFirst) {
+                drawCellular(canvas, RectF(left, top, left + signalW, top + iconH), signalLevel)
+                val batteryLeft = left + signalW + gap
+                drawBattery(
+                    canvas,
+                    RectF(batteryLeft, top, batteryLeft + batteryW, top + iconH),
+                    batteryPct
+                )
+            } else {
+                drawBattery(canvas, RectF(left, top, left + batteryW, top + iconH), batteryPct)
+                val signalLeft = left + batteryW + gap
+                drawCellular(
+                    canvas,
+                    RectF(signalLeft, top, signalLeft + signalW, top + iconH),
+                    signalLevel
+                )
+            }
+            textRight = minOf(textRight, left - dp(STATUS_CLUSTER_GAP_DP))
         }
 
         val available = (textRight - textLeft).coerceAtLeast(0f)
@@ -1500,7 +1711,9 @@ class PillView(context: Context) : View(context) {
             // An idle status bar pill (placeholder text or logo) is not a control: there is
             // nothing to expand into and nothing to swipe to, so it neither reacts to a tap nor
             // wobbles under the finger.
-            val idle = items.isEmpty()
+            // Measure mode has no content yet still must be tappable, or the expanded card's
+            // outline could never be looked at.
+            val idle = items.isEmpty() && !outlineOnly
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x

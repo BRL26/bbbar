@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.telephony.TelephonyManager
 import android.view.View
 import android.view.ViewGroup
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -48,6 +49,19 @@ class NowBarHook : IXposedHookLoadPackage {
         /** Hidden only while these are 1. Written by the settings app through root. */
         const val KEY_HIDE_ICONS = "bbbar_hide_notif_icons"
         const val KEY_HIDE_CHIPS = "bbbar_hide_live_chips"
+
+        /**
+         * 1 while the pill owns the right end of the strip (the inverse layout, issue #10). The
+         * hook then hides Android's battery / network icon cluster and puts the notification icons
+         * back, since the pill no longer sits on top of them.
+         */
+        const val KEY_INVERSE = "bbbar_inverse"
+
+        /**
+         * Cellular signal level (0..4) as SystemUI reads it, or -1 when there is no reading. The
+         * inverse pill draws the bars itself, so it needs the number the hidden icons used.
+         */
+        const val KEY_CELL_LEVEL = "bbbar_cell_level"
 
         /**
          * Heartbeat: `SystemClock.elapsedRealtime()` of the last proof that the hook is live in
@@ -127,6 +141,25 @@ class NowBarHook : IXposedHookLoadPackage {
 
         /** Verified on Nothing OS 5.0: res/layout/status_bar.xml, id 0x7f0b0718. */
         private const val ID_NAME_ICON_AREA = "notification_icon_area"
+
+        /** The right-hand cluster: battery, wifi, mobile signal - the icons the inverse pill takes.
+         *  AOSP id name, and the fallback is the container around it. */
+        private val SYSTEM_AREA_ID_NAMES = listOf("system_icon_area", "system_icons")
+
+        /**
+         * The camera / microphone privacy indicator. It is drawn in the same right-hand corner as
+         * the inverse pill and its own window sits above the overlay, so it is hidden with the
+         * system icon cluster. AOSP's container id, plus the dot's own id for builds that put it
+         * somewhere else.
+         */
+        private val PRIVACY_ID_NAMES = listOf(
+            "privacy_chip_container",
+            "privacy_dot",
+            "privacy_chip"
+        )
+
+        /** How often the cellular level is sampled. The icon does not need a faster cadence. */
+        private const val CELL_VISIT_MS = 5_000L
     }
 
     /** Views this hook has hidden, so it only ever puts back what it took away. */
@@ -152,6 +185,12 @@ class NowBarHook : IXposedHookLoadPackage {
 
     /** Only one clock sampler per SystemUI process. */
     private var clockWatching = false
+
+    /** Only one cellular sampler per SystemUI process. */
+    private var cellularWatching = false
+
+    /** Last signal level published, so a steady signal costs no provider writes. */
+    private var lastCellLevel = Int.MIN_VALUE
 
     /** The status bar clock, once found; the tree is only walked until it is. */
     private var clockView: View? = null
@@ -323,6 +362,9 @@ class NowBarHook : IXposedHookLoadPackage {
                         }
                         if (clock != null) publishClock(clock)
                         publishScreen(statusBar)
+                        // The privacy dot appears and disappears between layouts, so it is swept
+                        // here as well: a dot SystemUI re-shows is gone again within half a second.
+                        hidePrivacy(statusBar, flag(statusBar.context, KEY_INVERSE))
                     } catch (t: Throwable) {
                         Log.w("hook: clock sample failed", t)
                     }
@@ -509,18 +551,42 @@ class NowBarHook : IXposedHookLoadPackage {
                 clockWatching = true
                 sampleClock(statusBar)
             }
-            val area = findIconArea(statusBar)
-            if (area == null) {
-                Log.w("hook: notification icon area not found, icons left alone")
-                return
+            // The inverse pill needs the cellular level its hidden icons used, so SystemUI reads
+            // it here while it still holds the phone permission.
+            startCellular(context)
+            val notifArea = findArea(statusBar, listOf(ID_NAME_ICON_AREA))
+            val systemArea = findArea(statusBar, SYSTEM_AREA_ID_NAMES)
+            val privacyArea = findArea(statusBar, PRIVACY_ID_NAMES)
+            if (privacyArea == null) {
+                Log.i("hook: privacy chip container not found by id, watching class names instead")
+            } else {
+                Log.i("hook: privacy chip container found (${privacyArea.javaClass.name})")
             }
-            Log.i("hook: icon area found (${area.javaClass.name})")
-            val apply = { applySwitches(context, area) }
+            if (notifArea == null) {
+                Log.w("hook: notification icon area not found, icons left alone")
+            } else {
+                Log.i("hook: icon area found (${notifArea.javaClass.name})")
+            }
+            if (systemArea == null) {
+                Log.w("hook: system icon area not found, battery/network icons left alone")
+            } else {
+                Log.i("hook: system icon area found (${systemArea.javaClass.name})")
+            }
+            if (notifArea == null && systemArea == null) return
+            val apply = { applySwitches(context, notifArea, systemArea, statusBar) }
             apply()
+            // The privacy chip is created lazily and re-shown whenever the camera or microphone
+            // changes, which is a layout; this keeps it hidden without polling the whole tree.
+            try {
+                statusBar.viewTreeObserver.addOnGlobalLayoutListener { apply() }
+            } catch (t: Throwable) {
+                Log.w("hook: privacy layout listener not registered", t)
+            }
 
-            // Children come and go as notifications do, and the area re-lays out when they do.
+            // Children come and go as notifications do, and the areas re-lay out when they do.
             // Alpha only, so this cannot cause another layout pass and cannot loop.
-            area.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> apply() }
+            notifArea?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> apply() }
+            systemArea?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> apply() }
 
             try {
                 val resolver = context.contentResolver
@@ -535,6 +601,9 @@ class NowBarHook : IXposedHookLoadPackage {
                 resolver.registerContentObserver(
                     Settings.Global.getUriFor(KEY_HIDE_CHIPS), false, observer
                 )
+                resolver.registerContentObserver(
+                    Settings.Global.getUriFor(KEY_INVERSE), false, observer
+                )
             } catch (t: Throwable) {
                 Log.w("hook: switch observer not registered", t)
             }
@@ -544,7 +613,7 @@ class NowBarHook : IXposedHookLoadPackage {
     }
 
     /** Depth-first search by resource id name, so a changed class name does not matter. */
-    private fun findIconArea(view: View): ViewGroup? {
+    private fun findArea(view: View, names: List<String>): ViewGroup? {
         try {
             if (view is ViewGroup) {
                 if (view.id != View.NO_ID) {
@@ -553,11 +622,11 @@ class NowBarHook : IXposedHookLoadPackage {
                     } catch (t: Throwable) {
                         null
                     }
-                    if (name == ID_NAME_ICON_AREA) return view
+                    if (name != null && names.any { it == name }) return view
                 }
                 for (i in 0 until view.childCount) {
                     val child = view.getChildAt(i) ?: continue
-                    findIconArea(child)?.let { return it }
+                    findArea(child, names)?.let { return it }
                 }
             }
         } catch (t: Throwable) {
@@ -566,27 +635,151 @@ class NowBarHook : IXposedHookLoadPackage {
         return null
     }
 
-    /** Hides or restores the children the switches ask for. */
-    private fun applySwitches(context: Context, area: ViewGroup) {
+    /**
+     * Hides or restores the children the switches ask for.
+     *
+     * Inverse is authoritative for the notification icons: the pill has moved off them, so they
+     * come back even if "Hide notification icons" is still on. Its own right-hand cluster goes the
+     * other way - the hook hides it and the pill draws the battery and signal glyphs instead.
+     */
+    private fun applySwitches(
+        context: Context,
+        notifArea: ViewGroup?,
+        systemArea: ViewGroup?,
+        root: View?
+    ) {
         try {
-            val hideIcons = flag(context, KEY_HIDE_ICONS)
+            val inverse = flag(context, KEY_INVERSE)
+            val hideIcons = flag(context, KEY_HIDE_ICONS) && !inverse
             val hideChips = flag(context, KEY_HIDE_CHIPS)
-            for (i in 0 until area.childCount) {
-                val child = area.getChildAt(i) ?: continue
-                val name = child.javaClass.name
-                if (reported.add(name)) Log.i("hook: icon area child $name")
-                val isIcons = name.contains("NotificationIcon")
-                // Live updates are chips; SystemUI hosts them in a Compose view, so both shapes
-                // count. Anything that is neither is left exactly as it is.
-                val isChip = name.contains("Chip") ||
-                    name.contains("compose", ignoreCase = true) ||
-                    name.contains("Compose")
-                if (isIcons && hideIcons) hide(child)
-                else if (isChip && hideChips) hide(child)
-                else if (hidden.remove(child) != null) child.alpha = 1f
+
+            notifArea?.let { area ->
+                for (i in 0 until area.childCount) {
+                    val child = area.getChildAt(i) ?: continue
+                    val name = child.javaClass.name
+                    if (reported.add(name)) Log.i("hook: icon area child $name")
+                    val isIcons = name.contains("NotificationIcon")
+                    // Live updates are chips; SystemUI hosts them in a Compose view, so both shapes
+                    // count. Anything that is neither is left exactly as it is.
+                    val isChip = name.contains("Chip") ||
+                        name.contains("compose", ignoreCase = true) ||
+                        name.contains("Compose")
+                    if (isIcons && hideIcons) hide(child)
+                    else if (isChip && hideChips) hide(child)
+                    else restore(child)
+                }
             }
+
+            systemArea?.let { area ->
+                for (i in 0 until area.childCount) {
+                    val child = area.getChildAt(i) ?: continue
+                    val name = child.javaClass.name
+                    if (reported.add(name)) Log.i("hook: system icon area child $name")
+                    if (inverse) hide(child) else restore(child)
+                }
+            }
+
+            // Inverse layout only: the pill owns that corner, so the privacy indicator cannot sit
+            // on top of it. Both the AOSP container and any view whose class says Privacy are
+            // covered, because the dot is created by its own controller.
+            hidePrivacy(root, inverse)
         } catch (t: Throwable) {
             Log.e("hook: applySwitches threw", t)
+        }
+    }
+
+    /**
+     * Hides the camera / microphone privacy indicator while the inverse pill owns the corner it is
+     * drawn in. Only views this hook hid are put back, and only when the layout is not inverse, so
+     * the indicator is untouched in the normal layout.
+     */
+    private fun hidePrivacy(root: View?, inverse: Boolean) {
+        try {
+            if (root == null) return
+            val container = findArea(root, PRIVACY_ID_NAMES)
+            if (!inverse) {
+                container?.let { restore(it) }
+                val restored = hidden.keys.filter { it.javaClass.name.contains("Privacy") }
+                for (view in restored) restore(view)
+                return
+            }
+            container?.let {
+                if (hidden[it] == null) Log.i("hook: privacy indicator hidden (${it.javaClass.name})")
+                hide(it)
+            }
+            walkPrivacy(root) { view ->
+                if (hidden[view] == null) {
+                    Log.i("hook: privacy indicator hidden (${view.javaClass.name})")
+                }
+                hide(view)
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: privacy hide threw", t)
+        }
+    }
+
+    /** Depth-first walk over every view whose class name is the privacy indicator. */
+    private fun walkPrivacy(view: View, visit: (View) -> Unit) {
+        try {
+            if (view.javaClass.name.contains("Privacy")) visit(view)
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    val child = view.getChildAt(i) ?: continue
+                    walkPrivacy(child, visit)
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: privacy walk threw", t)
+        }
+    }
+
+    /** Puts back only a view this hook hid, so nothing legitimate is overwritten. */
+    private fun restore(view: View) {
+        if (hidden.remove(view) != null) view.alpha = 1f
+    }
+
+    /**
+     * Samples the cellular level SystemUI's own status icon shows. The inverse pill replaces that
+     * icon, and a plain app cannot read `signalStrength` without the phone permission - SystemUI
+     * has it, so it reads the level here and publishes the number.
+     */
+    private fun startCellular(context: Context) {
+        if (cellularWatching) return
+        cellularWatching = true
+        try {
+            val main = Handler(Looper.getMainLooper())
+            val tick = object : Runnable {
+                override fun run() {
+                    try {
+                        publishCellular(context)
+                    } catch (t: Throwable) {
+                        Log.w("hook: cellular sample failed", t)
+                    }
+                    main.postDelayed(this, CELL_VISIT_MS)
+                }
+            }
+            main.post(tick)
+        } catch (t: Throwable) {
+            cellularWatching = false
+            Log.w("hook: cellular sampler failed to start", t)
+        }
+    }
+
+    private fun publishCellular(context: Context) {
+        val level = try {
+            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            tm?.signalStrength?.level ?: -1
+        } catch (t: Throwable) {
+            // No SIM, no permission, or the API changed: the pill draws empty bars.
+            -1
+        }
+        if (level == lastCellLevel) return
+        lastCellLevel = level
+        try {
+            Settings.Global.putInt(context.contentResolver, KEY_CELL_LEVEL, level)
+            Log.i("hook: cellular level = $level")
+        } catch (t: Throwable) {
+            Log.w("hook: cellular write failed", t)
         }
     }
 

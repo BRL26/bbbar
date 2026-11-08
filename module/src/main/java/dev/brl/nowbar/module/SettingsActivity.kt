@@ -393,6 +393,14 @@ class SettingsActivity : AppCompatActivity() {
         surfaceSwitch(quick, "Lockscreen", TuningStore.SURFACE_LOCK)
         surfaceSwitch(quick, "Status bar", TuningStore.SURFACE_STATUS)
         surfaceSwitch(quick, "Expanded card", TuningStore.SURFACE_POPUP)
+        switchRow(
+            quick,
+            "Measure mode (outline only)",
+            "Every surface is drawn as an empty outline with no content, and stays up with " +
+                "nothing active, so sizes, edges and corner radii can be dialled in on the " +
+                "real screen.",
+            TuningStore.outline(this)
+        ) { on -> prefs.edit().putBoolean(TuningStore.OUTLINE, on).apply() }
 
         val body = card("Customization", "One page per surface and for the look of the cards")
         navRow(
@@ -557,11 +565,19 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun doReset() {
         try {
-            prefs.edit().clear().apply()
+            // A complete default file, not an empty one: this build's layout is explicit there.
+            TuningStore.rewriteDefaults(this)
             // The "an unlock happened in this boot" marker lives in its own file, so it has to be
             // cleared by hand - it is a session fact, not a setting.
             getSharedPreferences("nowbar_session", MODE_PRIVATE).edit().clear().apply()
             Log.sync(this)
+            // The hook's flags live in Settings.Global, not in these prefs: put the inverse flag
+            // back too, or a reset would leave Android's battery icons hidden with the pill back
+            // on the left.
+            Thread {
+                val value = if (TuningStore.DEFAULT_SB_INVERSE) 1 else 0
+                RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $value")
+            }.start()
             sendBroadcast(
                 Intent(this, TuningReceiver::class.java).setAction(TuningReceiver.ACTION_RELOAD)
             )
@@ -734,17 +750,67 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun statusBarPage() {
-        val body = card("Status bar pill", "Sits over the notification icons while unlocked")
+        val body = card(
+            "Status bar pill",
+            "At the right end by default (inverse); off puts it over the notification icons"
+        )
         surfaceSwitch(body, "Show in the status bar", TuningStore.SURFACE_STATUS)
         sbPreview = preview(body)
         sbCaption = caption(body)
+        // Inverse (issue #10): a store change reaches the overlay; the global flag reaches the
+        // hook, which owns hiding Android's cluster and restoring the notification icons.
+        switchRow(
+            body,
+            "Inverse: pill at the right end",
+            "On by default. Hides Android's battery / network icons and the privacy dot, brings " +
+                "the notification icons back and draws the battery and signal in the pill. The " +
+                "expanded card grows leftwards.",
+            TuningStore.sbInverse(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.SB_INVERSE, on).apply()
+            Thread {
+                val value = if (on) 1 else 0
+                RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $value")
+                runOnUiThread { Log.i("${NowBarHook.KEY_INVERSE} = $value") }
+            }.start()
+            // The edge control follows the layout: left edge is only meaningful when the pill
+            // is not anchored to the right.
+            renderPage()
+        }
+        choiceRow(
+            body,
+            "Battery / signal order",
+            TuningStore.STATUS_ICON_ORDER,
+            prefs.getString(TuningStore.STATUS_ICON_ORDER, TuningStore.DEFAULT_STATUS_ICON_ORDER)
+                ?: TuningStore.DEFAULT_STATUS_ICON_ORDER,
+            listOf(
+                TuningStore.DEFAULT_STATUS_ICON_ORDER to "Battery first",
+                TuningStore.STATUS_ICON_ORDER_SIGNAL_FIRST to "Signal first"
+            )
+        )
         sliderRow(body, "Width", "sbWidthDp", TuningStore.DEFAULT_SB_WIDTH_DP) { refreshPreviews() }
         sliderRow(body, "Height", "sbHeightDp", TuningStore.DEFAULT_SB_HEIGHT_DP) {
             refreshPreviews()
         }
         sliderRow(body, "Text size", "sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP, null)
         sliderRow(body, "Corner radius (0 = pill)", "sbRadiusDp", TuningStore.DEFAULT_SB_RADIUS_DP, null)
-        sliderRow(body, "Left edge (-1 = auto)", "sbLeftDp", TuningStore.DEFAULT_SB_LEFT_DP, null)
+        if (TuningStore.sbInverse(this)) {
+            sliderRow(
+                body,
+                "Right margin",
+                TuningStore.SB_RIGHT_MARGIN,
+                TuningStore.DEFAULT_SB_RIGHT_MARGIN_DP,
+                null
+            )
+        } else {
+            sliderRow(
+                body,
+                "Left edge (-1 = auto)",
+                "sbLeftDp",
+                TuningStore.DEFAULT_SB_LEFT_DP,
+                null
+            )
+        }
         sliderRow(body, "Top edge (-1 = centred)", "sbTopDp", TuningStore.DEFAULT_SB_TOP_DP, null)
         sliderRow(
             body,
@@ -758,6 +824,13 @@ class SettingsActivity : AppCompatActivity() {
             "Landscape top edge (-1 = same as portrait)",
             "sbLandscapeTopDp",
             TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
+            null
+        )
+        sliderRow(
+            body,
+            "Shade / Quick Settings left edge (-1 = unchanged)",
+            TuningStore.SB_SHADE_LEFT,
+            TuningStore.DEFAULT_SB_SHADE_LEFT_DP,
             null
         )
         sliderRow(
@@ -777,8 +850,9 @@ class SettingsActivity : AppCompatActivity() {
         captionView(
             body,
             "Landscape is set separately because the bar is shallower there and its clock sits " +
-                "closer to the edge. Landscape is always centred; a left edge is only used in " +
-                "portrait, where -1 means \"just past the clock\"."
+                "closer to the edge. Landscape is always centred. In portrait, inverse anchors the " +
+                "pill to the right and that margin is what moves it; with inverse off the left " +
+                "edge is used, where -1 means \"just past the clock\"."
         )
     }
 
@@ -1828,6 +1902,8 @@ class SettingsActivity : AppCompatActivity() {
                 prefs.getInt("sbTextDp", TuningStore.DEFAULT_SB_TEXT_DP),
                 label
             )
+            // The preview follows the layout: a right-anchored pill is shown on the right.
+            view.setAlignRight(TuningStore.sbInverse(this))
             sbCaption?.text = "$w × $h dp"
         }
         popupPreview?.let { view ->
@@ -2015,6 +2091,19 @@ class SettingsActivity : AppCompatActivity() {
     private class SurfacePreview(context: Context) : View(context) {
 
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.4f * resources.displayMetrics.density
+        }
+
+        /** Status pill preview: draw against the right edge when inverse is on. */
+        private var alignRight = false
+
+        fun setAlignRight(on: Boolean) {
+            if (alignRight == on) return
+            alignRight = on
+            invalidate()
+        }
         private val text = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
@@ -2067,10 +2156,17 @@ class SettingsActivity : AppCompatActivity() {
                 val s = scaleFor(width.toFloat())
                 val w = dp(widthDp.toFloat()).coerceAtLeast(1f) * s
                 val h = dp(heightDp.toFloat()).coerceAtLeast(1f) * s
-                val left = (width - w) / 2f
+                val left = if (alignRight) (width - w).coerceAtLeast(0f) else (width - w) / 2f
                 val top = (height - h) / 2f
                 val radius = if (radiusDp > 0) minOf(dp(radiusDp.toFloat()) * s, h / 2f) else h / 2f
                 rect.set(left, top, left + w, top + h)
+                // Measure mode is the real look now: the preview shows the same empty outline,
+                // so a size can be judged here before it is dialled in on the screen.
+                if (TuningStore.outline(context)) {
+                    stroke.color = fill.color
+                    canvas.drawRoundRect(rect, radius, radius, stroke)
+                    return
+                }
                 canvas.drawRoundRect(rect, radius, radius, fill)
 
                 text.textSize = dp(textDp.toFloat()) * s

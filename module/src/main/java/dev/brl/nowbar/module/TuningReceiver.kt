@@ -80,6 +80,13 @@ class TuningReceiver : BroadcastReceiver() {
                 edit.putString(TuningStore.RANK_ORDER, intent.getStringExtra(TuningStore.RANK_ORDER))
                 changed = true
             }
+            if (intent.hasExtra(TuningStore.STATUS_ICON_ORDER)) {
+                edit.putString(
+                    TuningStore.STATUS_ICON_ORDER,
+                    intent.getStringExtra(TuningStore.STATUS_ICON_ORDER)
+                )
+                changed = true
+            }
             if (intent.hasExtra("label")) {
                 edit.putString("label", intent.getStringExtra("label"))
                 changed = true
@@ -106,15 +113,16 @@ class TuningReceiver : BroadcastReceiver() {
         TuningStore.FEATURE_ALARM,
         TuningStore.FEATURE_LIVE,
         TuningStore.AOD_GRAY,
-        TuningStore.AOD_LINE_STYLE
+        TuningStore.AOD_LINE_STYLE,
+        TuningStore.SB_INVERSE,
+        TuningStore.OUTLINE
     )
 
     private fun intents(intent: Intent) =
         listOf(
             "widthDp", "heightDp", "textDp", "radiusDp", "bottomDp",
             "sbWidthDp", "sbHeightDp", "sbTextDp", "sbRadiusDp", "sbLeftDp", "sbTopDp",
-            "sbLandscapeLeftDp", "sbLandscapeTopDp", "sbShadeLeftDp", "sbShadeTopDp",
-            "sbShadeWidthDp",
+            "sbLandscapeLeftDp", "sbLandscapeTopDp",            "sbShadeLeftDp", "sbShadeTopDp", "sbShadeWidthDp", "sbRightDp",
             "aodDotCellDp", "aodDotSizeDp",
             "popupWidthDp", "popupHeightDp", "popupTextDp", "popupRadiusDp",
             "popupLeftDp", "popupTopDp", "popupLandscapeTopDp"

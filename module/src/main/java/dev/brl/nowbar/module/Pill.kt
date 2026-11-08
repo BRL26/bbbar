@@ -91,6 +91,9 @@ class PillView(context: Context) : View(context) {
         private const val STATUS_DIVIDER_TEXT_GAP_DP = 6f
         private const val STATUS_DIVIDER_ICON_GAP_DP = 3f
 
+        /** Extra space kept between the line and the rule, on top of the even split. */
+        private const val STATUS_DIVIDER_LINE_EXTRA_DP = 2f
+
         /** How far the card gives while the direction is still unknown. */
         private const val DRAG_GIVE_DP = 16f
 
@@ -371,8 +374,8 @@ class PillView(context: Context) : View(context) {
                 item.art != null -> glyphSize + dp(9f)
                 else -> 0f
             }
-            // The same gaps are reserved as are drawn, so the fitted width matches where the
-            // rule and the glyphs actually land.
+            // Room for the rule and the widest gap it can take, so a fitted pill never crowds
+            // the line against its own glyphs.
             val clusterW = if (statusGlyphs) {
                 statusClusterWidth(h) + statusDividerWidth() +
                     dp(STATUS_DIVIDER_TEXT_GAP_DP) + dp(STATUS_DIVIDER_ICON_GAP_DP)
@@ -1057,6 +1060,13 @@ class PillView(context: Context) : View(context) {
             textRight = left - dp(8f)
         }
 
+        // The line, before the rule is placed: the gap beside it depends on where its ink ends.
+        val title = when {
+            item == null -> if (allowIdle) label else ""
+            item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
+            else -> item.title.takeIf { it.isNotBlank() } ?: label
+        }
+
         // The inverse pill owns the end of the strip, so it draws the battery and signal icons
         // Android's cluster used to: right-aligned, then the line gets whatever is left.
         if (statusGlyphs) {
@@ -1068,14 +1078,26 @@ class PillView(context: Context) : View(context) {
             val left = right - statusClusterWidth(h)
             val top = (h - iconH) / 2f
             // The separator: a short rounded rule, dimmed so it groups the glyphs without
-            // competing with the line of text next to it.
+            // competing with the line of text next to it. It is placed halfway between the end of
+            // the text's ink and the glyphs, so the space reads the same on both sides - fixed
+            // margins never did, because a line ends on its advance width and that carries a
+            // trailing bearing wider than the space a margin was meant to leave.
             val dividerW = statusDividerWidth()
-            val dividerRight = left - dp(STATUS_DIVIDER_ICON_GAP_DP)
+            val iconGap = dp(STATUS_DIVIDER_ICON_GAP_DP)
+            val textEnd = (textLeft + titlePaint.measureText(title)).coerceAtMost(textRight)
+            val space = (left - textEnd - dividerW).coerceAtLeast(0f)
+            val ruleGap = (space / 2f).coerceIn(iconGap, dp(9f))
+            // A touch more room on the line's side than on the glyph side: the rule belongs to the
+            // text block, and an even split still read as it crowding the last letter.
+            val lineGap = ruleGap + dp(STATUS_DIVIDER_LINE_EXTRA_DP)
+            var dividerRight = textEnd + lineGap + dividerW
+            if (dividerRight > left - iconGap) dividerRight = left - iconGap
+            val dividerLeft = dividerRight - dividerW
             val dividerH = iconH * 0.9f
             val dividerTop = (h - dividerH) / 2f
             statusDivider.color = withAlpha(statusFill.color, 0x66)
             canvas.drawRoundRect(
-                RectF(dividerRight - dividerW, dividerTop, dividerRight, dividerTop + dividerH),
+                RectF(dividerLeft, dividerTop, dividerRight, dividerTop + dividerH),
                 dividerW / 2f,
                 dividerW / 2f,
                 statusDivider
@@ -1102,18 +1124,12 @@ class PillView(context: Context) : View(context) {
                     )
                 }
             }
-            textRight = minOf(
-                textRight,
-                dividerRight - dividerW - dp(STATUS_DIVIDER_TEXT_GAP_DP)
-            )
+            // The line stops at its ink. The rule's extra margin comes out of the room after it,
+            // never out of the line itself.
+            textRight = minOf(textRight, textEnd)
         }
 
         val available = (textRight - textLeft).coerceAtLeast(0f)
-        val title = when {
-            item == null -> if (allowIdle) label else ""
-            item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
-            else -> item.title.takeIf { it.isNotBlank() } ?: label
-        }
         val subtitle = if (item?.kind == ItemKind.TIMER) "" else item?.subtitle.orEmpty()
         val showSubtitle = expanded && subtitle.isNotBlank() && h >= dp(40f) && available >= dp(40f)
         // A media card that knows its length gets a scrubber under the name, with the elapsed time

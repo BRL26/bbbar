@@ -149,18 +149,133 @@ class PillView(context: Context) : View(context) {
     /** Scratch rect for the earbuds' stems, so the glyph costs no allocation per frame. */
     private val statusStem = RectF()
 
-    /** Inverts whatever is drawn through it: white becomes black on the doze screen. */
-    private val aodInvertPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        colorFilter = ColorMatrixColorFilter(
-            ColorMatrix(
-                floatArrayOf(
-                    -1f, 0f, 0f, 0f, 255f,
-                    0f, -1f, 0f, 0f, 255f,
-                    0f, 0f, -1f, 0f, 255f,
-                    0f, 0f, 0f, 1f, 0f
+    /** Offscreen buffer for the AOD's leading glyph, reused so a frame allocates nothing. */
+    private var aodGlyphBitmap: Bitmap? = null
+    private var aodGlyphCanvas: Canvas? = null
+    private var aodGlyphPixels = IntArray(0)
+
+    /**
+     * The leading glyph: the player's icon, the play button, the clock, the bell or the artwork.
+     * One place, so the AOD's one-bit treatment applies to all of them instead of the icon only.
+     */
+    private fun drawLeadingGlyph(
+        canvas: Canvas,
+        glyphRect: RectF,
+        glyphSize: Float,
+        item: NowBarItem?,
+        art: Bitmap?
+    ): Boolean {
+        when {
+            item?.kind == ItemKind.TIMER -> {
+                drawClock(canvas, glyphRect)
+            }
+            item?.kind == ItemKind.ALARM -> {
+                drawBell(canvas, glyphRect)
+            }
+            item?.kind == ItemKind.LIVE -> {
+                drawLiveDot(canvas, glyphRect)
+            }
+            item?.kind == ItemKind.MEDIA -> {
+                val pkg = item.packageName.orEmpty()
+                if (isKdeConnect(pkg)) {
+                    // KDE Connect's launcher icon is a phone with a plug: at 13 dp it reads as a
+                    // smudge. A play button says "this is the thing playing" instead.
+                    drawPlayButton(canvas, glyphRect)
+                } else {
+                    val icon = appIcon(pkg) ?: return false
+                    drawAppIcon(canvas, icon, glyphRect, glyphSize * 0.28f)
+                }
+            }
+            art != null && item?.kind != ItemKind.MEDIA -> {
+                artRect.set(
+                    glyphRect.left.toInt(),
+                    glyphRect.top.toInt(),
+                    glyphRect.right.toInt(),
+                    glyphRect.bottom.toInt()
                 )
-            )
-        )
+                drawCroppedArt(canvas, art, artRect, glyphSize / 2f)
+            }
+            else -> return false
+        }
+        return true
+    }
+
+    /** Grows the AOD glyph buffer to the slot, keeping its canvas and pixel scratch in step. */
+    private fun ensureAodGlyphBuffer(glyphRect: RectF): Bitmap? {
+        return try {
+            val w = kotlin.math.ceil(glyphRect.width()).toInt().coerceAtLeast(1)
+            val h = kotlin.math.ceil(glyphRect.height()).toInt().coerceAtLeast(1)
+            val current = aodGlyphBitmap
+            if (current != null && current.width == w && current.height == h) return current
+            val fresh = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            aodGlyphBitmap = fresh
+            aodGlyphCanvas = Canvas(fresh)
+            aodGlyphPixels = IntArray(w * h)
+            fresh
+        } catch (t: Throwable) {
+            Log.w("PillView AOD glyph buffer failed", t)
+            null
+        }
+    }
+
+    /**
+     * Rounds every pixel of the glyph to black or white, then flips the ones the dot lattice
+     * covers: the mark inverts in dots, the way the AOD line does.
+     */
+    private fun aodRoundAndInvert(bmp: Bitmap, leftInCard: Float, filledRight: Float) {
+        try {
+            val w = bmp.width
+            val h = bmp.height
+            val px = aodGlyphPixels
+            if (px.size != w * h) return
+            bmp.getPixels(px, 0, w, 0, 0, w, h)
+            val cell = aodDotCell()
+            val radius = aodDotRadius(cell)
+            var i = 0
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    val c = px[i]
+                    val a = c ushr 24
+                    if (a != 0) {
+                        val r = (c shr 16) and 0xFF
+                        val g = (c shr 8) and 0xFF
+                        val b = c and 0xFF
+                        val lum = (r * 299 + g * 587 + b * 114) / 1000
+                        var v = if (lum >= 128) 0xFF else 0
+                        val played = leftInCard + x <= filledRight
+                        if (played && inAodDot(x.toFloat(), y.toFloat(), cell, radius)) {
+                            v = 0xFF - v
+                        }
+                        px[i] = (a shl 24) or (v shl 16) or (v shl 8) or v
+                    }
+                    i++
+                }
+            }
+            bmp.setPixels(px, 0, w, 0, 0, w, h)
+        } catch (t: Throwable) {
+            Log.w("PillView AOD glyph rounding failed", t)
+        }
+    }
+
+    /**
+     * Whether a lattice dot covers this pixel. The dots sit on a checkerboard one cell apart, at
+     * (k + 0.5) * cell with k + m even, offset by the same drift the drawn lattice uses.
+     */
+    private fun inAodDot(x: Float, y: Float, cell: Float, radius: Float): Boolean {
+        if (cell <= 0f) return false
+        val u = x + driftX
+        val v = y + driftY
+        val baseK = Math.floor(((u - cell / 2f) / cell).toDouble()).toInt()
+        val baseM = Math.floor(((v - cell / 2f) / cell).toDouble()).toInt()
+        for (k in baseK - 1..baseK + 1) {
+            for (m in baseM - 1..baseM + 1) {
+                if ((k + m) % 2 != 0) continue
+                val dx = u - (k * cell + cell / 2f)
+                val dy = v - (m * cell + cell / 2f)
+                if (dx * dx + dy * dy <= radius * radius) return true
+            }
+        }
+        return false
     }
 
     private val statusDim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -1160,54 +1275,29 @@ class PillView(context: Context) : View(context) {
         // The lock screen's icon-only pill has no room for a leading glyph - the shape narrows
         // around the status icons - so it goes with the line.
         val hideLeading = statusGlyphs && statusOnlyMix > 0.5f
-        // The AOD inverts whatever sits in the glyph slot - the play button, the clock, an app
-        // icon alike - so a light mark becomes a dark one instead of leaving a white blob on the
-        // doze screen.
-        val aodGlyphLayer =
-            if (lineStyle && !hideLeading) canvas.saveLayer(glyphRect, aodInvertPaint) else -1
-        when {
-            hideLeading -> Unit
-            item?.kind == ItemKind.TIMER -> {
-                drawClock(canvas, glyphRect)
-                iconDrawn = true
+        // The AOD draws the leading glyph as one-bit art: every pixel is rounded to black or
+        // white, and the dot lattice flips the pixels it covers. The mark inverts in dots instead
+        // of turning into a solid block, and it works the same for a bitmap, the play button and
+        // the clock - nothing is special-cased.
+        val aodBmp = if (lineStyle && !hideLeading) ensureAodGlyphBuffer(glyphRect) else null
+        val aodCanvas = if (aodBmp != null) aodGlyphCanvas else null
+        if (aodBmp != null && aodCanvas != null) {
+            aodBmp.eraseColor(Color.TRANSPARENT)
+            val off = aodCanvas
+            val save = off.save()
+            try {
+                off.translate(-glyphRect.left, -glyphRect.top)
+                iconDrawn = drawLeadingGlyph(off, glyphRect, glyphSize, item, art)
+            } finally {
+                off.restoreToCount(save)
             }
-            item?.kind == ItemKind.ALARM -> {
-                drawBell(canvas, glyphRect)
-                iconDrawn = true
-            }
-            item?.kind == ItemKind.LIVE -> {
-                drawLiveDot(canvas, glyphRect)
-                iconDrawn = true
-            }
-            item?.kind == ItemKind.MEDIA -> {
-                val pkg = item?.packageName.orEmpty()
-                if (isKdeConnect(pkg)) {
-                    // KDE Connect's launcher icon is a phone with a plug: at 13 dp it reads as a
-                    // smudge. A play button says "this is the thing playing" instead.
-                    drawPlayButton(canvas, glyphRect)
-                    iconDrawn = true
-                } else {
-                    val icon = appIcon(pkg)
-                    if (icon != null) {
-                        drawAppIcon(canvas, icon, glyphRect, glyphSize * 0.28f)
-                        iconDrawn = true
-                    }
-                }
-            }
-            else -> {
-                if (art != null && item?.kind != ItemKind.MEDIA) {
-                    artRect.set(
-                        glyphRect.left.toInt(),
-                        glyphRect.top.toInt(),
-                        glyphRect.right.toInt(),
-                        glyphRect.bottom.toInt()
-                    )
-                    drawCroppedArt(canvas, art, artRect, glyphSize / 2f)
-                    iconDrawn = true
-                }
-            }
+            // Only the part the bar has already reached is dotted, exactly like the line: the
+            // lattice is the progress, not a texture over the whole mark.
+            aodRoundAndInvert(aodBmp, glyphRect.left, w * (item?.progress ?: 0f).coerceIn(0f, 1f))
+            canvas.drawBitmap(aodBmp, glyphRect.left, glyphRect.top, null)
+        } else if (!hideLeading) {
+            iconDrawn = drawLeadingGlyph(canvas, glyphRect, glyphSize, item, art)
         }
-        if (aodGlyphLayer >= 0) canvas.restoreToCount(aodGlyphLayer)
         if (iconDrawn) textLeft = glyphRect.right + dp(9f)
 
         // Controls live in the expanded card only. Media gets the transport set Android's own

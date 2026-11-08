@@ -157,6 +157,16 @@ class NowBarHook : IXposedHookLoadPackage {
         private val SYSTEM_AREA_ID_NAMES = listOf("system_icon_area", "system_icons")
 
         /**
+         * The views that hold the phone's own battery / Wi-Fi / signal icons. Their draw calls are
+         * hooked, because there is no race to lose that way: when the pill owns the corner these
+         * never paint, whatever SystemUI does to their alpha or visibility.
+         */
+        private val SYSTEM_ICON_CLASSES = listOf(
+            "com.android.systemui.statusbar.phone.StatusIconContainer",
+            "com.android.systemui.statusbar.StatusBarIconView"
+        )
+
+        /**
          * The camera / microphone privacy indicator. It is drawn in the same right-hand corner as
          * the inverse pill and its own window sits above the overlay, so it is hidden with the
          * system icon cluster. AOSP's container id, plus the dot's own id for builds that put it
@@ -226,6 +236,13 @@ class NowBarHook : IXposedHookLoadPackage {
 
     /** Last Bluetooth read, so the profile query does not run on every tick. */
     private var lastBtPoll = 0L
+
+    /** True while the pill owns the icon corner, which is when those views must not paint. */
+    @Volatile
+    private var systemIconsHidden = false
+
+    /** The icon draw hooks are installed once per SystemUI process. */
+    private var iconsHooked = false
 
     /**
      * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
@@ -612,6 +629,9 @@ class NowBarHook : IXposedHookLoadPackage {
                 if (!hookedPush) startVisibilitySampling(statusBar)
             }
             if (!hookedShade) hookedShade = hookShadePush(statusBar.javaClass.classLoader)
+            // Killing the draw call, not just the alpha: SystemUI rewrites alpha and visibility
+            // around screen-off, which is the frame where its own icons used to show through.
+            hookSystemIcons(statusBar.javaClass.classLoader)
             if (!clockWatching) {
                 clockWatching = true
                 sampleClock(statusBar)
@@ -735,6 +755,7 @@ class NowBarHook : IXposedHookLoadPackage {
     ) {
         try {
             val inverse = flag(context, KEY_INVERSE)
+            systemIconsHidden = inverse
             val hideIcons = flag(context, KEY_HIDE_ICONS) && !inverse
             val hideChips = flag(context, KEY_HIDE_CHIPS)
 
@@ -826,7 +847,10 @@ class NowBarHook : IXposedHookLoadPackage {
 
     /** Puts back only a view this hook hid, so nothing legitimate is overwritten. */
     private fun restore(view: View) {
-        if (hidden.remove(view) != null) view.alpha = 1f
+        if (hidden.remove(view) != null) {
+            view.alpha = 1f
+            view.visibility = View.VISIBLE
+        }
     }
 
     /**
@@ -874,15 +898,53 @@ class NowBarHook : IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * Hooks the draw path of the views that carry the phone's own status icons.
+     *
+     * Hiding them with alpha and visibility from the outside is a race: SystemUI rewrites both
+     * while the screen turns off, and the frame in between is exactly where the original battery
+     * and Wi-Fi icons flashed. A skipped draw call cannot be undone by any of that.
+     */
+    private fun hookSystemIcons(loader: ClassLoader) {
+        if (iconsHooked) return
+        iconsHooked = true
+        var hooked = 0
+        for (name in SYSTEM_ICON_CLASSES) {
+            try {
+                val cls = Class.forName(name, false, loader)
+                for (method in listOf("draw", "dispatchDraw")) {
+                    XposedBridge.hookAllMethods(cls, method, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (!systemIconsHidden) return
+                            // A null result on a void method is "do not run this".
+                            param.result = null
+                        }
+                    })
+                }
+                hooked++
+                Log.i("hook: $name no longer draws while the pill owns the corner")
+            } catch (t: Throwable) {
+                Log.w("hook: $name not hooked, leaving it to alpha", t)
+            }
+        }
+        Log.i("hook: system icon draw hooks on $hooked of ${SYSTEM_ICON_CLASSES.size} classes")
+    }
+
     private fun hide(view: View) {
         try {
             // Already ours and already invisible: skip the invalidate the reconcile loop would
             // otherwise cause every second on every icon.
-            if (hidden[view] == true && view.alpha == 0f) return
+            if (hidden[view] == true && view.alpha == 0f &&
+                view.visibility == View.INVISIBLE
+            ) return
             view.alpha = 0f
+            // Alpha alone was not enough: SystemUI re-applies it to individual icons when the
+            // screen turns off, which is the frame where the phone's own battery and Wi-Fi icons
+            // showed through. INVISIBLE is not touched by those passes, so nothing can be drawn.
+            view.visibility = View.INVISIBLE
             hidden[view] = true
         } catch (t: Throwable) {
-            Log.w("hook: alpha write threw", t)
+            Log.w("hook: hide threw", t)
         }
     }
 

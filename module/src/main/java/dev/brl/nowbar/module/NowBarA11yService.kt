@@ -75,6 +75,9 @@ class NowBarA11yService : AccessibilityService() {
         /** A hook beat older than this means SystemUI restarted without the hook loaded. */
         const val HOOK_STALE_MS = 180_000L
 
+        /** Reads that must agree before the pill leaves with the status bar. */
+        private const val SB_HIDDEN_CONFIRM = 2
+
         const val SLIDE_MS = 180L
         const val EXPAND_MS = 280L
         const val COLLAPSE_MS = 220L
@@ -269,6 +272,9 @@ class NowBarA11yService : AccessibilityService() {
     /** uptimeMillis until which the poll runs at BURST_POLL_MS. */
     private var burstUntil = 0L
 
+    /** Consecutive reads that said the status bar is hidden; one alone is not trusted. */
+    private var sbHiddenStreak = 0
+
     /** uptimeMillis until which a root keyguard signal is being confirmed at CONFIRM_POLL_MS. */
     private var confirmUntil = 0L
 
@@ -455,7 +461,9 @@ class NowBarA11yService : AccessibilityService() {
                 }
                 // The pill shares its strip with the notification icons: when SystemUI hides the
                 // status bar for a fullscreen app, the pill leaves with it and comes back after.
-                if (!locked && isInteractive()) syncStatusBarVisibility()
+                // Also while the keyguard is up: the strip carries the phone's status icons there
+                // too, and it has to come back when the bar does after a doze.
+                if (isInteractive()) syncStatusBarVisibility()
                 // A turn that nothing else noticed, or a display size that was still settling when
                 // the service started, leaves the pill placed for the old screen - which is how it
                 // ends up off the right edge. Re-place whenever the size really changes.
@@ -2675,7 +2683,17 @@ class NowBarA11yService : AccessibilityService() {
     private fun syncStatusBarVisibility() {
         try {
             val hidden = readStatusBarHidden()
-            if (hidden == sbHidden) return
+            if (hidden == sbHidden) {
+                sbHiddenStreak = 0
+                return
+            }
+            // Leaving takes two agreeing reads: SystemUI's state flaps while the keyguard comes
+            // and goes, and one flap was enough to slide the pill out and back on the lock screen.
+            if (hidden) {
+                sbHiddenStreak++
+                if (sbHiddenStreak < SB_HIDDEN_CONFIRM) return
+            }
+            sbHiddenStreak = 0
             sbHidden = hidden
             Log.i("status bar ${if (hidden) "hidden" else "visible"}: pill follows")
             if (hidden) {
@@ -3004,6 +3022,10 @@ class NowBarA11yService : AccessibilityService() {
     }
 
     private fun readStatusBarHidden(): Boolean {
+        // A dozing display has no strip to sit in, and SystemUI's own state flaps around the doze
+        // transition - which is what made the pill loop on and off on the always-on display. There
+        // the activity card is the only thing drawn.
+        if (!isInteractive()) return true
         return try {
             // The hook's value, which the system pushes into SystemUI the moment the bar changes.
             // A stale value (SystemUI restarted without the hook) is ignored, so a leftover 1 can

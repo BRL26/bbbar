@@ -80,11 +80,12 @@ visible there, on purpose. While the shade is open:
 - the pill is **only visible** there, never interactive: the window gets `FLAG_NOT_TOUCHABLE` and the
   view ignores touches, so a tap falls through to the shade's own header instead of expanding
   something under it
-- its height there is configurable: **Shade / Quick Settings top edge** in the status bar card
-  (`sbShadeTopDp`, `-1` = stay where it is). There is no left control because that strip has no
-  clock to dodge
+- it is the **same pill in the same place** as the status bar: the shade / Quick Settings header
+  gets the normal pill instead of a shade-specific one, so there is nothing to adjust and no
+  separate shade geometry to drift (the old `sbShadeLeftDp` / `sbShadeTopDp` / `sbShadeWidthDp`
+  settings are gone)
 
-Both switching and moving are pushed live from the same hook — the shade state comes from
+Both switching and showing are pushed live from the same hook — the shade state comes from
 `NotificationShadeWindowControllerImpl#apply`, reading its `shadeOrQsExpanded` field — so it happens
 with the shade animation, not after it.
 
@@ -311,10 +312,10 @@ then does back leave the app.
   or the idle line when nothing is active.
 - **Look** — the three surface switches, then one sub-page per surface plus the look pages:
   **Lockscreen pill**, **Status bar pill**, **Expanded card**, **Media artwork**, **Text and motion**,
-  **Always-on display** and **Idle line**. Sliders run `0…1000 dp` so nothing is capped; `-1` on a
-  left/top value means *auto*. The status bar page carries **Shade / Quick Settings top edge** and
-  **Shade / Quick Settings width** — `0` fits the line the way it always did, anything else is the
-  width the pill takes while the shade is open (clamped to the screen).
+  **Always-on display** and **Idle line**. Sliders run `0…1000 dp`; `-1` on a left/top value means
+  *auto*. The status bar page shows either a left edge or, with inverse on, the right margin, plus
+  the battery / signal order. The pill in the shade / Quick Settings is the same one, at the same
+  place, so there are no shade-specific controls.
 - **Activities** — the item switches (media, timers, alarms, live updates), the **ranking** list with
   ▲/▼, notification access, the app exclusions, the status-bar hiding switches, and **simulate**: a
   fake card of each kind drawn on the real pill, for judging a look without waiting for an activity.
@@ -368,9 +369,6 @@ The same keys the sliders write, for when the pill is covering something:
 ```bash
 adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
   --ei widthDp 340 --ei heightDp 68 --ei bottomDp 150
-
-adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
-  --ei sbShadeWidthDp 480    # fixed width while Quick Settings is open (0 = fit the line)
 
 adb shell am broadcast -a dev.brl.nowbar.module.SET -n dev.brl.nowbar.module/.TuningReceiver \
   --ez dump true      # log every stored value

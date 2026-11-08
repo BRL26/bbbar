@@ -826,27 +826,6 @@ class SettingsActivity : AppCompatActivity() {
             TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
             null
         )
-        sliderRow(
-            body,
-            "Shade / Quick Settings left edge (-1 = unchanged)",
-            TuningStore.SB_SHADE_LEFT,
-            TuningStore.DEFAULT_SB_SHADE_LEFT_DP,
-            null
-        )
-        sliderRow(
-            body,
-            "Shade / Quick Settings top edge (-1 = unchanged)",
-            TuningStore.SB_SHADE_TOP,
-            TuningStore.DEFAULT_SB_SHADE_TOP_DP,
-            null
-        )
-        sliderRow(
-            body,
-            "Shade / Quick Settings width (0 = fit the line)",
-            TuningStore.SB_SHADE_WIDTH,
-            TuningStore.DEFAULT_SB_SHADE_WIDTH_DP,
-            null
-        )
         captionView(
             body,
             "Landscape is set separately because the bar is shallower there and its clock sits " +

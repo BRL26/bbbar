@@ -1848,14 +1848,8 @@ class NowBarA11yService : AccessibilityService() {
     private fun fitSbWidth(view: PillView) {
         try {
             val lp = sbParams ?: return
-            val t = Tuning.sb(this)
-            // A fixed shade width is not fitted to the line: it is the width (clamped to the
-            // screen by sbWidthPx, since the dial goes well past it).
-            val wanted = if (shadeOpen() && t.shadeWidthDp > 0) {
-                sbWidthPx(t)
-            } else {
-                view.preferredWidth(sbMaxWidthPx(), lp.height)
-            }
+            // The shade and the status bar show the same pill: always fit the line.
+            val wanted = view.preferredWidth(sbMaxWidthPx(), lp.height)
             if (lp.width == wanted && sbWidthAnimator?.isRunning != true) return
             // Several preferences can land in the same applyAll: an animation already heading for
             // this width is left alone instead of being restarted from its current frame.
@@ -1957,14 +1951,15 @@ class NowBarA11yService : AccessibilityService() {
             "placing sb pill: screen=${screenWidthPx()}x${screenHeightPx()} " +
                 "landscape=${isLandscape()} shade=${shadeOpen()}"
         )
-        val top = sbTopDp(t)
-        lp.y = if (top >= 0) dp(top) else ((statusBarTopPx() - lp.height) / 2).coerceAtLeast(0)
+        // A value saved in another orientation (or from before a rotation) can land outside the
+        // screen; that is how the pill vanished in landscape. Out-of-range values fall back to
+        // the automatic place, which is itself clamped to the screen.
+        lp.y = sbYFor(t, lp.height)
         // Normal layout: the tuned left edge or just past the clock. Inverse: the pill ends at
         // the right edge and grows leftwards. Landscape is centred in both layouts.
         lp.x = sbXFor(lp.width, t)
         // Never off the screen, whatever the numbers say.
         lp.x = lp.x.coerceIn(0, (screenWidthPx() - lp.width).coerceAtLeast(0))
-        applyShadePosition(lp, t)
     }
 
     /** Horizontal centre for a window [widthPx] wide. */
@@ -1980,9 +1975,7 @@ class NowBarA11yService : AccessibilityService() {
      */
     private fun sbXFor(widthPx: Int, t: Tuning.Sb): Int {
         if (isLandscape()) return centeredX(widthPx)
-        if (shadeOpen() && t.shadeLeftDp >= 0) return dp(t.shadeLeftDp)
         if (t.inverse) return inverseSbX(widthPx)
-        if (shadeOpen()) return dp(16)
         val left = sbLeftDp(t)
         return if (left >= 0) dp(left) else autoSbLeft(widthPx)
     }
@@ -1999,39 +1992,13 @@ class NowBarA11yService : AccessibilityService() {
     private fun sbMaxWidthPx(): Int {
         val t = Tuning.sb(this)
         val tuned = dp(t.widthDp)
-        return when {
-            // A width set for the shade is a width, not a ceiling: that screen has room, and the
-            // number is what the owner asked for.
-            shadeOpen() -> if (t.shadeWidthDp > 0) dp(t.shadeWidthDp) else maxOf(tuned, screenWidthPx() / 2)
-            isLandscape() -> maxOf(tuned, screenWidthPx() / 3)
-            else -> tuned
-        }
+        // The shade / Quick Settings shows the same pill in the same place as the status bar, so
+        // there is no separate width for it any more.
+        return if (isLandscape()) maxOf(tuned, screenWidthPx() / 3) else tuned
     }
 
-    /**
-     * The width the pill is laid out at. In the shade a configured width wins over anything the
-     * line would ask for, so the pill there is the size the owner dialled in.
-     */
-    private fun sbWidthPx(t: Tuning.Sb): Int =
-        if (shadeOpen() && t.shadeWidthDp > 0) {
-            // A tuned shade width is clamped to the screen: the dial goes well past it.
-            dp(t.shadeWidthDp).coerceAtMost(screenWidthPx())
-        } else {
-            dp(t.widthDp)
-        }
-
-    /**
-     * The shade and Quick Settings have their own header, so the pill can be given a place of its
-     * own there. Both values default to -1, which means "stay where you are" - zero is a real
-     * position, so it could not be used to mean unset.
-     */
-    private fun applyShadePosition(lp: WindowManager.LayoutParams, t: Tuning.Sb) {
-        if (!shadeOpen()) return
-        // No clock in that strip, so the gap the clock needs is not wanted here: the pill goes to
-        // the tuned shade edge, or a small margin. Inverse still means the right end.
-        lp.x = sbXFor(lp.width, t)
-        if (t.shadeTopDp >= 0) lp.y = dp(t.shadeTopDp)
-    }
+    /** The width the pill is laid out at: the tuned status-bar width, nothing shade-specific. */
+    private fun sbWidthPx(t: Tuning.Sb): Int = dp(t.widthDp)
 
     /**
      * The clock's right edge as the hook saw it, 0 when there is no clock on screen. The pill is
@@ -2162,11 +2129,19 @@ class NowBarA11yService : AccessibilityService() {
         return sbXFor(width, t).coerceIn(0, (screenWidthPx() - width).coerceAtLeast(0))
     }
 
-    private fun sbPillY(): Int {
-        val t = Tuning.sb(this)
-        if (shadeOpen() && t.shadeTopDp >= 0) return dp(t.shadeTopDp)
-        val top = sbTopDp(t)
-        return if (top >= 0) dp(top) else ((statusBarTopPx() - dp(t.heightDp)) / 2).coerceAtLeast(0)
+    private fun sbPillY(): Int = sbYFor(Tuning.sb(this), dp(Tuning.sb(this).heightDp))
+
+    /**
+     * Top edge for the status pill, clamped to the screen. A tuned value saved in the other
+     * orientation (a landscape-only top) used to put the pill below the display after a rotation;
+     * an out-of-range value now falls back to the automatic place instead.
+     */
+    private fun sbYFor(t: Tuning.Sb, heightPx: Int): Int {
+        val maxY = (screenHeightPx() - heightPx).coerceAtLeast(0)
+        val tunedY = if (sbTopDp(t) >= 0) dp(sbTopDp(t)) else -1
+        if (tunedY in 0..maxY) return tunedY
+        val inset = statusBarTopPx().coerceIn(0, maxY)
+        return ((inset - heightPx) / 2).coerceIn(0, maxY)
     }
 
     /**

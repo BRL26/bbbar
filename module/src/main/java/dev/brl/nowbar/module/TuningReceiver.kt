@@ -121,8 +121,7 @@ class TuningReceiver : BroadcastReceiver() {
     private fun intents(intent: Intent) =
         listOf(
             "widthDp", "heightDp", "textDp", "radiusDp", "bottomDp",
-            "sbWidthDp", "sbHeightDp", "sbTextDp", "sbRadiusDp", "sbLeftDp", "sbTopDp",
-            "sbLandscapeLeftDp", "sbLandscapeTopDp",            "sbShadeLeftDp", "sbShadeTopDp", "sbShadeWidthDp", "sbRightDp",
+            "sbWidthDp", "sbHeightDp", "sbTextDp", "sbRadiusDp", "sbLeftDp", "sbTopDp",            "sbLandscapeLeftDp", "sbLandscapeTopDp", "sbRightDp",
             "aodDotCellDp", "aodDotSizeDp",
             "popupWidthDp", "popupHeightDp", "popupTextDp", "popupRadiusDp",
             "popupLeftDp", "popupTopDp", "popupLandscapeTopDp"

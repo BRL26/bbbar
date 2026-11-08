@@ -70,22 +70,6 @@ object TuningStore {
     const val AOD_LINE_STYLE = "aodLineStyle"
 
     /**
-     * Where the status pill sits while the shade / Quick Settings is open: -1 on either means "do
-     * not move". Zero is a real position, so it cannot mean "unset" here.
-     */
-    const val SB_SHADE_LEFT = "sbShadeLeftDp"
-    const val SB_SHADE_TOP = "sbShadeTopDp"
-    const val DEFAULT_SB_SHADE_LEFT_DP = -1
-    const val DEFAULT_SB_SHADE_TOP_DP = -1
-
-    /**
-     * How wide the pill is while the shade / Quick Settings is open. 0 means "fit the line", which
-     * is what it did before there was a setting: the pill grows up to half the screen.
-     */
-    const val SB_SHADE_WIDTH = "sbShadeWidthDp"
-    const val DEFAULT_SB_SHADE_WIDTH_DP = 0
-
-    /**
      * AOD dot spacing in dp: how tightly packed the lattice is.
      */
     const val AOD_DOT_CELL = "aodDotCellDp"
@@ -291,7 +275,7 @@ object TuningStore {
      * written by an older build, so geometry dialled in for the old layout cannot leave the new
      * one half-configured (that is how the pill kept a left-edge value after moving to the right).
      */
-    const val CONFIG_VERSION = 3
+    const val CONFIG_VERSION = 4
     private const val CONFIG_VERSION_KEY = "configVersion"
 
     /** Rewrites the whole tuning file when it was written by an older build. */
@@ -370,9 +354,6 @@ object TuningStore {
         e.putInt("sbTopDp", DEFAULT_SB_TOP_DP)
         e.putInt("sbLandscapeLeftDp", DEFAULT_SB_LANDSCAPE_LEFT_DP)
         e.putInt("sbLandscapeTopDp", DEFAULT_SB_LANDSCAPE_TOP_DP)
-        e.putInt(SB_SHADE_LEFT, DEFAULT_SB_SHADE_LEFT_DP)
-        e.putInt(SB_SHADE_TOP, DEFAULT_SB_SHADE_TOP_DP)
-        e.putInt(SB_SHADE_WIDTH, DEFAULT_SB_SHADE_WIDTH_DP)
         e.putString(STATUS_ICON_ORDER, DEFAULT_STATUS_ICON_ORDER)
         e.putInt(SB_RIGHT_MARGIN, DEFAULT_SB_RIGHT_MARGIN_DP)
 

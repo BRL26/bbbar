@@ -26,15 +26,6 @@ object Tuning {
         val leftLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_LEFT_DP,
         val topLandscapeDp: Int = TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP,
         /**
-         * Where to sit while the shade or Quick Settings is open; -1 means "stay where you are".
-         * That screen has its own header, so the strip the pill normally shares with the clock is
-         * laid out differently.
-         */
-        val shadeLeftDp: Int = TuningStore.DEFAULT_SB_SHADE_LEFT_DP,
-        val shadeTopDp: Int = TuningStore.DEFAULT_SB_SHADE_TOP_DP,
-        /** Fixed width in the shade; 0 means "fit the line", as before the setting existed. */
-        val shadeWidthDp: Int = TuningStore.DEFAULT_SB_SHADE_WIDTH_DP,
-        /**
          * Right end of the strip instead of the left: the pill covers Android's battery and
          * network icons (hidden by the hook), draws its own, and its card grows leftwards.
          */
@@ -94,9 +85,6 @@ object Tuning {
                 "sbLandscapeTopDp",
                 TuningStore.DEFAULT_SB_LANDSCAPE_TOP_DP
             ),
-            shadeLeftDp = p.getInt("sbShadeLeftDp", TuningStore.DEFAULT_SB_SHADE_LEFT_DP),
-            shadeTopDp = p.getInt("sbShadeTopDp", TuningStore.DEFAULT_SB_SHADE_TOP_DP),
-            shadeWidthDp = p.getInt("sbShadeWidthDp", TuningStore.DEFAULT_SB_SHADE_WIDTH_DP),
             inverse = TuningStore.sbInverse(context),
             rightMarginDp = TuningStore.sbRightMarginDp(context),
             signalFirst = TuningStore.statusSignalFirst(context),

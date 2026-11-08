@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v1.11.0** — [release notes](https://github.com/BRL26/bbbar/releases)
+**v2.0.0** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.0.0)
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that

@@ -83,16 +83,18 @@ class PillView(context: Context) : View(context) {
          * 1.2 dp rule. At 27 dp the glyphs would otherwise read as loose marks inside the pill
          * instead of a group of their own.
          *
-         * The gap on the text side is twice the one on the glyph side: text ends on its last
-         * glyph's advance width, which carries a little trailing bearing, so an equal margin read
-         * as the rule crowding the line while it floated off the icons.
+         * The rule sits exactly halfway between the line's ink and the glyph cluster: the same
+         * gap on both sides is what makes it read as a separator rather than as something
+         * drifting towards one of them.
          */
         private const val STATUS_DIVIDER_W_DP = 1.2f
-        private const val STATUS_DIVIDER_TEXT_GAP_DP = 6f
-        private const val STATUS_DIVIDER_ICON_GAP_DP = 3f
 
-        /** Extra space kept between the line and the rule, on top of the even split. */
-        private const val STATUS_DIVIDER_LINE_EXTRA_DP = 2f
+        /**
+         * Room asked for on each side of the rule when the pill is fitted to its line. The
+         * drawing splits whatever space it actually gets in half, so this only sets how wide the
+         * pill comes out - it never decides the two gaps separately.
+         */
+        private const val STATUS_DIVIDER_GAP_DP = 5.5f
 
         /** How far the card gives while the direction is still unknown. */
         private const val DRAG_GIVE_DP = 16f
@@ -289,6 +291,9 @@ class PillView(context: Context) : View(context) {
     /** Wi-Fi, cellular, or neither: whichever connection the pill should draw (see [Networks]). */
     private var networkKind = Networks.MOBILE
 
+    /** Last status-bar geometry that was logged, so the numbers are printed once per change. */
+    private var sbGeomLogged = ""
+
     /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
     private var gray = 0f
     private var grayAnimator: ValueAnimator? = null
@@ -379,8 +384,7 @@ class PillView(context: Context) : View(context) {
             // towards the icons.
             val clusterW = if (statusGlyphs) {
                 statusClusterWidth(h) + statusDividerWidth() +
-                    dp(STATUS_DIVIDER_TEXT_GAP_DP) + dp(STATUS_DIVIDER_ICON_GAP_DP) +
-                    dp(STATUS_DIVIDER_LINE_EXTRA_DP)
+                    dp(STATUS_DIVIDER_GAP_DP) * 2f
             } else {
                 0f
             }
@@ -542,6 +546,23 @@ class PillView(context: Context) : View(context) {
 
     /** Room the separator between the line and the cluster takes. */
     private fun statusDividerWidth(): Float = dp(STATUS_DIVIDER_W_DP)
+
+    /**
+     * Right edge of the line's ink, for placing the separator by what the eye sees.
+     *
+     * The advance width includes the last glyph's trailing bearing, which is empty space, so a
+     * margin measured from it is wider on screen than the same margin taken from the glyphs.
+     */
+    private fun textInkRight(text: String, left: Float, advanceEnd: Float): Float {
+        if (text.isEmpty()) return advanceEnd
+        return try {
+            val bounds = Rect()
+            titlePaint.getTextBounds(text, 0, text.length, bounds)
+            (left + bounds.right).coerceIn(left, advanceEnd)
+        } catch (t: Throwable) {
+            advanceEnd
+        }
+    }
 
     /** A battery outline with the charge inside it, ending in a small nub. */
     private fun drawBattery(canvas: Canvas, area: RectF, pct: Int) {
@@ -1085,17 +1106,27 @@ class PillView(context: Context) : View(context) {
             // margins never did, because a line ends on its advance width and that carries a
             // trailing bearing wider than the space a margin was meant to leave.
             val dividerW = statusDividerWidth()
-            val iconGap = dp(STATUS_DIVIDER_ICON_GAP_DP)
+
             val textEnd = (textLeft + titlePaint.measureText(title)).coerceAtMost(textRight)
-            // Split what is there *after* the line's extra has been set aside, so both sides keep
-            // their share: the text gets its extra margin and the glyphs keep the gap they had.
-            val extra = dp(STATUS_DIVIDER_LINE_EXTRA_DP)
-            val space = (left - textEnd - dividerW).coerceAtLeast(0f)
-            val ruleGap = (((space - extra) / 2f).coerceAtLeast(0f)).coerceIn(iconGap, dp(9f))
-            val lineGap = ruleGap + extra
-            var dividerRight = textEnd + lineGap + dividerW
-            if (dividerRight > left - iconGap) dividerRight = left - iconGap
-            val dividerLeft = dividerRight - dividerW
+            // The gap is measured from the line's *ink*, not from its advance width: the advance
+            // carries the last glyph's trailing bearing, so the same nominal margin left a wide
+            // gap on the text side and a narrow one on the glyph side. Whole pixels either side,
+            // which no fixed margin could do.
+            val inkEnd = textInkRight(title, textLeft, textEnd)
+            val space = (left - inkEnd - dividerW).coerceAtLeast(0f)
+            // Half the room on each side, worked out from the space that is actually there, so
+            // the two gaps are equal in pixels however wide the pill ends up being.
+            val ruleGap = (space / 2f).coerceAtLeast(0f)
+            val dividerLeft = inkEnd + ruleGap
+            val dividerRight = dividerLeft + dividerW
+            if (sbGeomLogged != "$w/$pad/$inkEnd/$left") {
+                sbGeomLogged = "$w/$pad/$inkEnd/$left"
+                Log.i(
+                    "sb geom w=$w pad=$pad advEnd=$textEnd inkEnd=$inkEnd " +
+                        "clusterLeft=$left clusterW=${statusClusterWidth(h)} space=$space " +
+                        "gapL=${dividerLeft - inkEnd} gapR=${left - dividerRight}"
+                )
+            }
             val dividerH = iconH * 0.9f
             val dividerTop = (h - dividerH) / 2f
             statusDivider.color = withAlpha(statusFill.color, 0x66)

@@ -149,7 +149,7 @@ class PillView(context: Context) : View(context) {
     /** Scratch rect for the earbuds' stems, so the glyph costs no allocation per frame. */
     private val statusStem = RectF()
 
-    /** Inverts whatever is drawn through it, for the AOD's light-on-black icons. */
+    /** Inverts whatever is drawn through it: white becomes black on the doze screen. */
     private val aodInvertPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         colorFilter = ColorMatrixColorFilter(
             ColorMatrix(
@@ -162,7 +162,14 @@ class PillView(context: Context) : View(context) {
             )
         )
     }
+
     private val statusDim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
+    /** The same dim colour as an outline, for the AOD's unlit cellular bars. */
+    private val statusDimStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = dp(1f)
+    }
     private val scrim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val tintLayer = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
@@ -641,12 +648,14 @@ class PillView(context: Context) : View(context) {
             val stemW = bodyR * 1.15f
             val bodyCy = area.top + h * 0.40f
             val stemBottom = area.top + h * 0.94f
+            // On the AOD the buds are line work like everything else there.
+            val paint = if (lineStyle) statusStroke else statusFill
             for (dir in intArrayOf(-1, 1)) {
                 val cx = area.centerX() + dir * area.width() * 0.20f
-                canvas.drawCircle(cx, bodyCy, bodyR, statusFill)
+                canvas.drawCircle(cx, bodyCy, bodyR, paint)
                 val stemLeft = cx + dir * bodyR * 0.15f - stemW / 2f
                 statusStem.set(stemLeft, bodyCy, stemLeft + stemW, stemBottom)
-                canvas.drawRoundRect(statusStem, stemW / 2f, stemW / 2f, statusFill)
+                canvas.drawRoundRect(statusStem, stemW / 2f, stemW / 2f, paint)
             }
         } catch (t: Throwable) {
             Log.w("PillView.drawBuds failed", t)
@@ -684,33 +693,57 @@ class PillView(context: Context) : View(context) {
             canvas.drawRoundRect(body, radius, radius, statusStroke)
             val nubTop = area.centerY() - area.height() * 0.21f
             val nubBottom = area.centerY() + area.height() * 0.21f
+            // On the AOD everything is drawn as line work, so even the nub is an outline.
             canvas.drawRoundRect(
                 RectF(body.right + dp(0.5f), nubTop, area.right, nubBottom),
                 dp(0.6f),
                 dp(0.6f),
-                statusFill
+                if (lineStyle) statusStroke else statusFill
             )
             if (pct >= 0) {
                 val inset = body.height() * 0.24f
                 val innerW = (body.width() - inset * 2f).coerceAtLeast(0f)
                 val fillW = innerW * (pct.coerceIn(0, 100) / 100f)
                 if (fillW > 0.5f) {
-                    val r = (radius * 0.6f).coerceAtLeast(0.5f)
-                    canvas.drawRoundRect(
-                        RectF(
-                            body.left + inset,
-                            body.top + inset,
-                            body.left + inset + fillW,
-                            body.bottom - inset
-                        ),
-                        r,
-                        r,
-                        statusFill
+                    val charge = RectF(
+                        body.left + inset,
+                        body.top + inset,
+                        body.left + inset + fillW,
+                        body.bottom - inset
                     )
+                    if (lineStyle) {
+                        // The AOD draws the charge as dots, packed far tighter than the pill's own
+                        // lattice: it is a fill, not a texture.
+                        val cell = (area.height() * 0.16f)
+                            .coerceIn(dp(1.2f), dp(3f))
+                        drawDottedFill(canvas, charge, cell)
+                    } else {
+                        val r = (radius * 0.6f).coerceAtLeast(0.5f)
+                        canvas.drawRoundRect(charge, r, r, statusFill)
+                    }
                 }
             }
         } catch (t: Throwable) {
             Log.w("PillView battery glyph failed", t)
+        }
+    }
+
+    /**
+     * Fills [area] with the dot lattice instead of a solid tone: the AOD is line work, and the
+     * battery's charge is the one place that needs a fill rather than an outline.
+     */
+    private fun drawDottedFill(canvas: Canvas, area: RectF, cell: Float) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            val layer = canvas.saveLayer(area, null)
+            canvas.clipRect(area)
+            dotPaint.shader = dotShader(cell, statusFill.color)
+            dotPaint.shader!!.setLocalMatrix(dotPhaseMatrix())
+            canvas.drawRect(area, dotPaint)
+            dotPaint.shader = null
+            canvas.restoreToCount(layer)
+        } catch (t: Throwable) {
+            Log.w("PillView dotted fill failed", t)
         }
     }
 
@@ -761,7 +794,13 @@ class PillView(context: Context) : View(context) {
                 val left = area.left + i * (barW + gap)
                 val rect = RectF(left, area.bottom - barH, left + barW, area.bottom)
                 val r = barW * 0.34f
-                canvas.drawRoundRect(rect, r, r, if (i < lit) statusFill else statusDim)
+                if (lineStyle) {
+                    // AOD: bars are outlines, only the lit ones carry the glyph colour.
+                    val paint = if (i < lit) statusStroke else statusDimStroke
+                    canvas.drawRoundRect(rect, r, r, paint)
+                } else {
+                    canvas.drawRoundRect(rect, r, r, if (i < lit) statusFill else statusDim)
+                }
             }
         } catch (t: Throwable) {
             Log.w("PillView cellular glyph failed", t)
@@ -803,6 +842,8 @@ class PillView(context: Context) : View(context) {
             statusStroke.color = onSurface
             statusFill.color = onSurface
             statusDim.color = withAlpha(onSurface, 0x3D)
+            statusDimStroke.color = withAlpha(onSurface, 0x3D)
+            statusDimStroke.strokeWidth = statusStroke.strokeWidth
             tintLayer.color = withAlpha(primary, 0x8C)
             scrim.color = withAlpha(surface, 0xCC)
         } catch (t: Throwable) {
@@ -1119,6 +1160,11 @@ class PillView(context: Context) : View(context) {
         // The lock screen's icon-only pill has no room for a leading glyph - the shape narrows
         // around the status icons - so it goes with the line.
         val hideLeading = statusGlyphs && statusOnlyMix > 0.5f
+        // The AOD inverts whatever sits in the glyph slot - the play button, the clock, an app
+        // icon alike - so a light mark becomes a dark one instead of leaving a white blob on the
+        // doze screen.
+        val aodGlyphLayer =
+            if (lineStyle && !hideLeading) canvas.saveLayer(glyphRect, aodInvertPaint) else -1
         when {
             hideLeading -> Unit
             item?.kind == ItemKind.TIMER -> {
@@ -1161,6 +1207,7 @@ class PillView(context: Context) : View(context) {
                 }
             }
         }
+        if (aodGlyphLayer >= 0) canvas.restoreToCount(aodGlyphLayer)
         if (iconDrawn) textLeft = glyphRect.right + dp(9f)
 
         // Controls live in the expanded card only. Media gets the transport set Android's own
@@ -1658,18 +1705,7 @@ class PillView(context: Context) : View(context) {
     private fun drawAppIcon(canvas: Canvas, icon: Drawable, area: RectF, radius: Float) {
         canvas.save()
         try {
-            // The AOD is light dots on black: an icon left as it is would be a dark smudge there,
-            // so it is inverted to the same weight as the text beside it.
-            if (lineStyle) {
-                canvas.saveLayer(area, aodInvertPaint)
-                try {
-                    drawClippedIcon(canvas, icon, area, radius)
-                } finally {
-                    canvas.restore()
-                }
-            } else {
-                drawClippedIcon(canvas, icon, area, radius)
-            }
+            drawClippedIcon(canvas, icon, area, radius)
         } catch (t: Throwable) {
             Log.w("PillView app icon failed", t)
         } finally {

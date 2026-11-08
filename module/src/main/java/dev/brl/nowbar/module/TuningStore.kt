@@ -82,7 +82,9 @@ object TuningStore {
     const val DEFAULT_AOD_DOT_CELL_DP = 8
 
     fun aodDotCellDp(context: Context): Int = try {
-        prefs(context).getInt(AOD_DOT_CELL, DEFAULT_AOD_DOT_CELL_DP).coerceIn(3, 24)
+        // Down to 2 dp: the lattice is meant to be packed tight if that is what is asked for, and
+        // the dot size shrinks with it so the dots stay separate.
+        prefs(context).getInt(AOD_DOT_CELL, DEFAULT_AOD_DOT_CELL_DP).coerceIn(2, 24)
     } catch (t: Throwable) {
         DEFAULT_AOD_DOT_CELL_DP
     }

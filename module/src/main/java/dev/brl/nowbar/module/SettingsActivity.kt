@@ -943,7 +943,7 @@ class SettingsActivity : AppCompatActivity() {
             "AOD dot spacing",
             TuningStore.AOD_DOT_CELL,
             TuningStore.DEFAULT_AOD_DOT_CELL_DP,
-            3..24
+            2..24
         )
         sliderInRange(
             body,

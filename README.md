@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v1.0.0** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v1.0.0)
+**v1.11.0** — [release notes](https://github.com/BRL26/bbbar/releases)
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that
@@ -129,6 +129,25 @@ and once the log rotated there was nothing to find at all. A file kill switch st
 touch /data/local/tmp/bbbar_hook_off   # SystemUI loads with no hook at all
 ```
 
+The same hook also *stops the draw*. Alpha and visibility are a race: SystemUI rewrites both while
+the screen turns off, and the frame in between is exactly where the phone's own battery and Wi-Fi
+flashed through under the pill. So the views that carry them (`StatusIconContainer`,
+`StatusBarIconView`, the Nothing-specific wrappers, and every class actually found inside
+`system_icon_area`) get `draw` / `dispatchDraw` hooked, and the call is skipped while the pill owns
+that corner. A skipped draw cannot be undone by an alpha pass.
+
+Only the **void** overloads may be skipped. `View` also has
+`draw(Canvas, ViewGroup, long) -> boolean`, which `ViewGroup.drawChild` reads to know whether the
+child painted itself: cancelling it leaves drawChild unboxing a `null` into a boolean, which is a
+hard `NullPointerException` in the middle of a frame. That crash looped SystemUI on boot, and LSPosed
+answers a boot crash loop with **safe mode** (every module off until it is cleared). The hook now
+walks `declaredMethods` and hooks only methods whose return type is `void`.
+
+The keyguard draws its own status bar, with its own icon views, from a separate tree — which is why
+the phone's battery and Wi-Fi came back on the lock screen after the strip's copy was hidden. The
+same hook now hooks the keyguard bar's constructor too and registers its icon area, so both copies
+follow the same switch.
+
 Three surfaces, each with its own geometry:
 
 | Surface | What it is | Where |
@@ -183,6 +202,20 @@ The stored configuration is versioned (`configVersion`). A file written by an ol
 in for the old layout cannot leave the new one half-configured. The status pill's numbers are also
 clamped to what the strip can hold (40–1000 × 12–96 dp), so a stale slider extreme cannot make it
 cover the screen.
+
+## The lock screen's strip pill
+
+The status pill stays up on the lock screen whenever the bar itself is visible, but there it carries
+the phone's status icons and nothing else: battery, Wi-Fi or cellular (whichever is actually up), and
+earbuds when a Bluetooth audio device is connected. The activity card at the bottom already says
+what is playing, so the strip is the readout the system icons used to be.
+
+Locking morphs the pill rather than swapping it: the line and its leading glyph fade out, the status
+cluster slides from the right end to the middle of the shape, the progress strip and the divider go
+with the line, and the window width animates down to the cluster. Unlocking reverses it. The strip
+pill on the lock screen is a readout, not a control: the window is `FLAG_NOT_TOUCHABLE` and the view
+ignores touches while the keyguard is up. Opening the shade while locked removes it altogether — the
+shade has its own header, and there is nothing the pill could open.
 
 ## Unlock/lock detection
 
@@ -431,14 +464,15 @@ module/src/main/java/dev/brl/nowbar/module/
   RootKeeper.kt          root loop that keeps the accessibility service enabled
   NowBarWatchdog.kt      alarm-based fallback keeper (+ WatchdogReceiver.kt, boot re-arm)
   UserPresentReceiver.kt ACTION_USER_PRESENT → service
-  NowBarHook.kt          LSPosed prototype entry (inert, see below)
+  NowBarHook.kt          LSPosed entry: hides Android's icons, publishes bar/clock/signal state
 ```
 
 ## Known limits
 
-- **No AOD pill.** `TYPE_ACCESSIBILITY_OVERLAY` is not composited while the display dozes, so the
-  pill is timed against the display (`SCREEN_OFF`, `isInteractive`), never the doze screen. A real
-  AOD pill needs a window type that survives dozing; not attempted.
+- **No strip pill on the AOD.** A dozing display reports as a hidden status bar, and SystemUI's
+  state flaps around that transition, which made the strip pill add and remove itself in a loop.
+  It is kept out of the AOD entirely; the activity card is the only thing drawn there, in the line
+  + dots look. Leaving the strip needs two agreeing reads, so a single flap cannot bring it back.
 - **No per-app allow / deny list yet.** Any app that posts a media session, a chronometer or a
   progress notification becomes a card; individual apps cannot be excluded.
 - **The idle pill is a status bar surface only.** Lockscreen and popup disappear when nothing is
@@ -446,9 +480,14 @@ module/src/main/java/dev/brl/nowbar/module/
   stays on the strip with the placeholder label as its text, or with no text at all when that label
   is blank. There is no switch that hides it; the old Text / Logo / Hide switch is gone, because a
   stored "Hide" looked exactly like a dead bar and nothing ever reset it.
-- **The LSPosed hook only hides**, it never draws or lays out: it sets `alpha` on the status bar's
-  notification-icon area children. Everything the pill shows comes from the accessibility overlay,
-  which is why a changed Nothing OS build cannot break the pill itself.
+- **The LSPosed hook only hides**, it never draws or lays out: it sets `alpha` / `visibility` on the
+  status bar's icon areas and skips their `draw` calls. Everything the pill shows comes from the
+  accessibility overlay, which is why a changed Nothing OS build cannot break the pill itself. It
+  does hook `draw` on view classes it finds inside those areas, so a build that moves the icons
+  somewhere else simply goes unhidden rather than breaking.
+- **A module crash at boot puts LSPosed in safe mode.** Safe mode disables every module until it is
+  cleared, which looks exactly like "the hook stopped working": no `bbbar_hook_beat`, and the
+  phone's own battery / Wi-Fi stay in the strip. Check the beat value before blaming the build.
 - **No root daemon.** The `app_process` overlay approach was abandoned: `WindowManager` rejects its
   window with `Unknown pid … uid=0`. Root is used only for the logcat wakeup stream and the two
   `Settings.Global` switches.

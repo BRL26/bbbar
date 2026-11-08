@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v1.10.0, published** (`github.com/BRL26/bbbar`, tag `v1.10.0`). Base is settled: the accessibility
+**v1.11.0** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -420,6 +420,40 @@ Enable / disable:
 - [x] **The `\u2190` literal** in the Back button was written as an escaped backslash in the source;
       it renders as an arrow now.
 
+### Status strip and the SystemUI hook
+- [x] **Inverse layout**: the pill owns the right end of the strip, draws its own battery and
+      Wi-Fi / cellular glyphs, and the hook hides Android's icon cluster (`system_icon_area`)
+- [x] Network glyph follows the connection: Wi-Fi when on Wi-Fi (even with data up), cellular when
+      only data is up, nothing when offline; battery always drawn
+- [x] Glyph order is a setting, and a short rounded hairline divides the line from the cluster;
+      the gap is measured from the text's ink and halved, so both sides are equal in pixels
+- [x] The pill's battery is a lattice of dots rather than a solid fill; the cluster rides the right
+      end of the strip and the line stops before the rule's own room
+- [x] **Lock screen**: the same strip pill, icons only (battery, network, earbuds), centred, with no
+      line, divider or progress strip; locking/unlocking morphs it instead of swapping windows
+- [x] The lock-screen strip pill is not interactive, and the shade while locked removes it
+      altogether (the shade has its own header)
+- [x] **Keyguard's own status bar** is hooked too: it draws a second copy of the icons from its own
+      tree, which is why they came back on the lock screen after the strip's copy was hidden
+- [x] **Privacy chip** hidden by the hook while the pill owns that corner (it is in its own window,
+      above the overlay, so it sat on top of the pill)
+- [x] The strip pill is out of the AOD (doze reports a hidden bar and flaps, which looped it)
+- [x] **KDE Connect** cards draw a play button instead of the launcher icon; the AOD inverts the
+      whole glyph slot by luminance, so the play button inverts to black like any app icon
+- [x] SystemUI's icons are stopped at `draw` / `dispatchDraw`, not just alpha: SystemUI rewrote
+      alpha and visibility during screen-off, which is the frame where they flashed through
+
+### Hook fixes worth remembering
+- [x] **SystemUI crashed on every boot → LSPosed safe mode**: `hookAllMethods(cls, "draw")` also
+      caught `View.draw(Canvas, ViewGroup, long) -> boolean`. Cancelling it made `ViewGroup.drawChild`
+      unbox a null into a boolean (`NullPointerException` in the middle of the frame), SystemUI
+      crash-looped, and LSPosed answered with safe mode — every module off, which looked exactly
+      like "the hook stopped working". The hook now walks `declaredMethods` and hooks only methods
+      that return `void`. Safe mode has to be cleared (reboot / the manager) before a module loads
+      again.
+- [x] **Draw guard with no area refs** skipped *every* instance of the hooked class (a common view
+      class included). It now draws instead: an unhidden icon is recoverable, a blank shade is not.
+
 ## Next
 
 ### Pill content
@@ -483,10 +517,11 @@ torch, VPN, next calendar event.
   *display*, never the doze screen.
 - **`KeyguardManager.addKeyguardLockedStateListener` throws** on this build
   (`enforceSubscribeToKeyguardLockedStatePermission`), hence the root logcat watcher.
-- **The LSPosed hook only hides** (`NowBarHook.kt`): repeated SystemUI restarts pushed LSPosed into
-  safe mode once and a restart cleared the wallpaper bind, so it never draws and never lays out —
-  it only sets `alpha` on the status bar's notification icon area children. Everything the pill
-  shows still comes from the accessibility overlay.
+- **The LSPosed hook only hides** (`NowBarHook.kt`): it never draws and never lays out — it sets
+  `alpha` / `visibility` on the status bar's icon areas and skips their `draw` calls. Everything the
+  pill shows still comes from the accessibility overlay. **A crash inside SystemUI at boot makes
+  LSPosed enter safe mode** (all modules off, `bbbar_hook_beat` stays `null`, Android's own battery
+  and Wi-Fi stay in the strip); clear safe mode before reading a stale hook as a broken build.
 - **The hook needs the module enabled for `com.android.systemui`** in LSPosed, and one SystemUI
   restart after installing a new build. `touch /data/local/tmp/bbbar_hook_off` disables it entirely.
 - **Status bar visibility is verified both ways** (owner confirmed). Home screen: the launcher's

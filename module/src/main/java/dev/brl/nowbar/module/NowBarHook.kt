@@ -161,6 +161,29 @@ class NowBarHook : IXposedHookLoadPackage {
          * hooked, because there is no race to lose that way: when the pill owns the corner these
          * never paint, whatever SystemUI does to their alpha or visibility.
          */
+        private const val KIND_ICONS = 1
+        private const val KIND_PRIVACY = 2
+
+        /** Names the keyguard's status bar may have on this build. */
+        private val KEYGUARD_BAR_CLASSES = listOf(
+            "com.android.systemui.statusbar.phone.KeyguardStatusBarView",
+            "com.nothing.systemui.statusbar.phone.NTKeyguardStatusBarView",
+            "com.android.systemui.keyguard.ui.view.KeyguardStatusBarView"
+        )
+
+        /** Name fragments of the classes that draw the phone's own status icons. */
+        private val ICON_CLASS_HINTS = listOf(
+            "StatusBarIconView",
+            "StatusIconContainer",
+            "WifiWrapper",
+            "WifiView",
+            "MobileIcon",
+            "SignalIcon",
+            "RiveWifi",
+            "RiveBattery",
+            "BatteryIcon"
+        )
+
         private val SYSTEM_ICON_CLASSES = listOf(
             "com.android.systemui.statusbar.phone.StatusIconContainer",
             "com.android.systemui.statusbar.StatusBarIconView"
@@ -241,8 +264,24 @@ class NowBarHook : IXposedHookLoadPackage {
     @Volatile
     private var systemIconsHidden = false
 
+    /** True while the privacy dot would sit on top of the pill. */
+    @Volatile
+    private var privacyHidden = false
+
+    /** The view that holds the camera / microphone indicator. */
+    private var privacyAreaRef: java.lang.ref.WeakReference<View>? = null
+
     /** The icon draw hooks are installed once per SystemUI process. */
     private var iconsHooked = false
+
+    /**
+     * The views that hold the phone's own status icons. There is one on the strip and one on the
+     * keyguard, and both have to stay blank.
+     */
+    private val systemAreas = mutableListOf<java.lang.ref.WeakReference<View>>()
+
+    /** Classes already hooked, so a re-attach does not stack another hook on the same method. */
+    private val hookedClasses = HashSet<String>()
 
     /**
      * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
@@ -606,6 +645,10 @@ class NowBarHook : IXposedHookLoadPackage {
                     }
                 }
             })
+            // The keyguard draws its own status bar with its own icon views, which is why the
+            // phone's battery and Wi-Fi only came back on the lock screen: nothing was hiding that
+            // copy. Hooked here, by every name this build could use.
+            hookKeyguardBar(lpparam.classLoader)
             Log.i(
                 "hook: attached in SystemUI (${Build.MANUFACTURER} ${Build.MODEL}, " +
                     "release=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT})"
@@ -656,6 +699,13 @@ class NowBarHook : IXposedHookLoadPackage {
                 Log.w("hook: system icon area not found, battery/network icons left alone")
             } else {
                 Log.i("hook: system icon area found (${systemArea.javaClass.name})")
+                // Hook whatever is actually in there, by class, gated on the instance: this
+                // build draws its icons with its own views, so class names alone miss them.
+                registerSystemArea(systemArea)
+            }
+            if (privacyArea != null) {
+                privacyAreaRef = java.lang.ref.WeakReference(privacyArea)
+                hookAreaDraws(privacyArea, KIND_PRIVACY)
             }
             if (notifArea == null && systemArea == null) return
             val apply = { applySwitches(context, notifArea, systemArea, statusBar) }
@@ -756,6 +806,16 @@ class NowBarHook : IXposedHookLoadPackage {
         try {
             val inverse = flag(context, KEY_INVERSE)
             systemIconsHidden = inverse
+            privacyHidden = inverse
+            // The privacy chip is created lazily and the icon views are rebuilt when the
+            // configuration changes, so their classes are picked up on every pass.
+            systemArea?.let { area -> hookAreaDraws(area, KIND_ICONS) }
+            if (root != null) {
+                findArea(root, PRIVACY_ID_NAMES)?.let { area ->
+                    privacyAreaRef = java.lang.ref.WeakReference(area)
+                    hookAreaDraws(area, KIND_PRIVACY)
+                }
+            }
             val hideIcons = flag(context, KEY_HIDE_ICONS) && !inverse
             val hideChips = flag(context, KEY_HIDE_CHIPS)
 
@@ -899,6 +959,175 @@ class NowBarHook : IXposedHookLoadPackage {
     }
 
     /**
+     * Hooks the lock screen's own status bar and registers its icon area.
+     *
+     * The keyguard has a separate view tree from the strip, so hiding the strip's icons left the
+     * lock screen drawing the phone's battery and Wi-Fi from a second set of views.
+     */
+    private fun hookKeyguardBar(loader: ClassLoader) {
+        var hooked = 0
+        for (name in KEYGUARD_BAR_CLASSES) {
+            try {
+                val cls = Class.forName(name, false, loader)
+                if (!View::class.java.isAssignableFrom(cls)) continue
+                XposedBridge.hookAllConstructors(cls, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val view = param.thisObject as? View ?: return
+                            view.post { registerKeyguardBar(view, name) }
+                        } catch (t: Throwable) {
+                            Log.w("hook: keyguard bar post threw", t)
+                        }
+                    }
+                })
+                hooked++
+                Log.i("hook: keyguard status bar hooked ($name)")
+            } catch (t: Throwable) {
+                Log.w("hook: $name not on this build", t)
+            }
+        }
+        Log.i("hook: keyguard status bar hooks on $hooked of ${KEYGUARD_BAR_CLASSES.size}")
+    }
+
+    /** Registers a keyguard bar's icon area and hides it right away if the pill owns the corner. */
+    private fun registerKeyguardBar(bar: View, source: String) {
+        try {
+            val area = findArea(bar, SYSTEM_AREA_ID_NAMES)
+            if (area == null) {
+                Log.i("hook: keyguard bar $source has no system icon area")
+                return
+            }
+            registerSystemArea(area)
+            if (systemIconsHidden) hideTree(area)
+            Log.i(
+                "hook: keyguard icon area ready (${area.javaClass.name}, " +
+                    "${if (area is ViewGroup) area.childCount else 0} children)"
+            )
+        } catch (t: Throwable) {
+            Log.w("hook: keyguard bar registration failed", t)
+        }
+    }
+
+    /** Adds an icon area to the set the draw guard tests against, hooking its view classes. */
+    private fun registerSystemArea(area: View) {
+        if (systemAreas.any { it.get() === area }) return
+        systemAreas.add(java.lang.ref.WeakReference(area))
+        hookAreaDraws(area, KIND_ICONS)
+    }
+
+    /** Hides a view and the children it holds right now. */
+    private fun hideTree(view: View) {
+        hide(view)
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val child = view.getChildAt(i) ?: continue
+                hideTree(child)
+            }
+        }
+    }
+
+    /** Hooks [area] and every view already inside it, so none of them can paint. */
+    private fun hookAreaDraws(area: View, kind: Int) {
+        hookNoDraw(area.javaClass, kind)
+        if (area is ViewGroup) {
+            for (i in 0 until area.childCount) {
+                val child = area.getChildAt(i) ?: continue
+                hookAreaDraws(child, kind)
+            }
+        }
+    }
+
+    /**
+     * Hooks `draw` / `dispatchDraw` of [cls], skipping only instances that live under the area
+     * this kind belongs to - so hooking a common class like FrameLayout cannot blank the rest of
+     * SystemUI.
+     */
+    private fun hookNoDraw(cls: Class<*>, kind: Int) {
+        try {
+            if (!View::class.java.isAssignableFrom(cls)) return
+            if (!hookedClasses.add("${cls.name}#$kind")) return
+            val n = hookVoidDraws(cls, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val view = param.thisObject as? View ?: return
+                        if (!skipDraw(view, kind)) return
+                        // A null result on a void method is "do not run this".
+                        param.result = null
+                    } catch (t: Throwable) {
+                        Log.w("hook: draw guard threw", t)
+                    }
+                }
+            })
+            if (n == 0) return
+            Log.i("hook: ${cls.name} draw hooked (kind $kind)")
+        } catch (t: Throwable) {
+            Log.w("hook: could not hook ${cls.name}", t)
+        }
+    }
+
+    /**
+     * Hooks only the draw entry points that return nothing.
+     *
+     * `View` has a second `draw(Canvas, ViewGroup, long)` overload that returns a boolean, and it
+     * is what `ViewGroup.drawChild` reads to know whether the child painted itself. Cancelling
+     * that one leaves drawChild unboxing a null into a boolean, which is a hard NullPointerException
+     * in the middle of a frame - SystemUI died on every boot because of it, and LSPosed answers a
+     * boot crash loop with safe mode. The void overloads are the only ones that can be skipped.
+     */
+    private fun hookVoidDraws(cls: Class<*>, hook: XC_MethodHook): Int {
+        var n = 0
+        try {
+            for (m in cls.declaredMethods) {
+                if (m.name != "draw" && m.name != "dispatchDraw") continue
+                if (m.returnType != java.lang.Void.TYPE) continue
+                if (java.lang.reflect.Modifier.isStatic(m.modifiers)) continue
+                XposedBridge.hookMethod(m, hook)
+                n++
+            }
+        } catch (t: Throwable) {
+            Log.w("hook: void draw scan failed for ${cls.name}", t)
+        }
+        return n
+    }
+
+    /** Whether this view must not paint: the right area is hidden and the view is inside it. */
+    private fun skipDraw(view: View, kind: Int): Boolean {
+        val on = if (kind == KIND_ICONS) systemIconsHidden else privacyHidden
+        if (!on) return false
+        // The icon classes are icon-only: the shade's header draws the same ones from a second
+        // set of instances, which are not under the strip's area, so the class decides as well.
+        if (kind == KIND_ICONS && isIconClass(view.javaClass.name)) return true
+        if (kind == KIND_ICONS) {
+            // With no area left to compare against there is no way to tell an icon from the rest
+            // of SystemUI, so it draws: blanking every instance of a common class would take
+            // half the shade with it.
+            val areas = systemAreas.mapNotNull { it.get() }
+            if (areas.isEmpty()) return false
+            return areas.any { isUnder(view, it) }
+        }
+        val area = privacyAreaRef?.get() ?: return false
+        return isUnder(view, area)
+    }
+
+    /**
+     * Classes that exist only to draw the phone's battery / network / signal icons. A name test,
+     * so an updated build's reshuffled class still matches as long as it keeps the meaning.
+     */
+    private fun isIconClass(name: String): Boolean =
+        ICON_CLASS_HINTS.any { name.contains(it) }
+
+    private fun isUnder(view: View, area: View): Boolean {
+        var current: View? = view
+        var hops = 0
+        while (current != null && hops < 12) {
+            if (current === area) return true
+            current = current.parent as? View
+            hops++
+        }
+        return false
+    }
+
+    /**
      * Hooks the draw path of the views that carry the phone's own status icons.
      *
      * Hiding them with alpha and visibility from the outside is a race: SystemUI rewrites both
@@ -912,15 +1141,14 @@ class NowBarHook : IXposedHookLoadPackage {
         for (name in SYSTEM_ICON_CLASSES) {
             try {
                 val cls = Class.forName(name, false, loader)
-                for (method in listOf("draw", "dispatchDraw")) {
-                    XposedBridge.hookAllMethods(cls, method, object : XC_MethodHook() {
+                if (hookVoidDraws(cls, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (!systemIconsHidden) return
                             // A null result on a void method is "do not run this".
                             param.result = null
                         }
-                    })
-                }
+                    }) == 0
+                ) continue
                 hooked++
                 Log.i("hook: $name no longer draws while the pill owns the corner")
             } catch (t: Throwable) {

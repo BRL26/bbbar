@@ -1289,6 +1289,7 @@ class NowBarA11yService : AccessibilityService() {
                 existing.setStatusOnly(false)
                 fitSbWidth(existing)
             }
+            setSbTouchable(!shadeOpen())
             Log.i("unlock handover: lock window removed in ${SystemClock.uptimeMillis() - t0}ms (removeViewImmediate)")
             logFirstFrame("unlock handover", t0)
         } catch (t: Throwable) {
@@ -1321,6 +1322,9 @@ class NowBarA11yService : AccessibilityService() {
                 view.setItems(emptyList(), false, 0)
                 fitSbWidth(view)
             }
+            // Nothing on the lock screen can be tapped: it would open the card underneath a
+            // keyguard that has to be dismissed first anyway.
+            setSbTouchable(false)
             // A window that was already over the keyguard keeps it away until it leaves.
             if (lockPill == null && !lockPillSuppressed) addLockPill(fadeIn = true)
             Log.i("lock handover: status pill is the icon strip, keyguard pill in place instantly")
@@ -1873,6 +1877,8 @@ class NowBarA11yService : AccessibilityService() {
             windowManager.addView(view, lp)
             sbPill = view
             sbParams = lp
+            // The lock screen's pill is a readout, not a control: no taps while the keyguard is up.
+            setSbTouchable(!shadeOpen() && lastLocked != true)
             if (slideIn) {
                 animateY(view, lp, -lp.height, targetY, SLIDE_MS, DecelerateInterpolator(1.6f), null)
             } else if (fadeIn) {
@@ -2106,6 +2112,13 @@ class NowBarA11yService : AccessibilityService() {
             if (shadeOpen()) {
                 removeLockPill()
                 removePopup()
+                // On the lock screen the shade brings its own header, and a pill there would just
+                // sit on top of it - there is nothing to open it for either while locked.
+                if (lastLocked == true) {
+                    removeSbPill()
+                    Log.i("shade open while locked: no strip pill")
+                    return
+                }
                 if (sbPill == null && TuningStore.isOn(this, TuningStore.MASTER)) addSbPill()
                 if (sbPill != null) {
                     setSbTouchable(false)
@@ -2113,7 +2126,7 @@ class NowBarA11yService : AccessibilityService() {
                 }
                 Log.i("shade open: top pill shown, not interactive")
             } else {
-                setSbTouchable(true)
+                setSbTouchable(lastLocked != true)
                 if (sbPill != null) applySbTuning()
                 // Back to the normal rules: the keyguard pill if locked, the top pill if not.
                 updateSurfaces()

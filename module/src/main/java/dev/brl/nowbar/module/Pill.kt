@@ -80,11 +80,16 @@ class PillView(context: Context) : View(context) {
 
         /**
          * The hairline between the line and the trailing battery / network cluster: a rounded
-         * 1.2 dp rule with the same gap on each side. At 27 dp the glyphs would otherwise read as
-         * loose marks inside the pill instead of a group of their own.
+         * 1.2 dp rule. At 27 dp the glyphs would otherwise read as loose marks inside the pill
+         * instead of a group of their own.
+         *
+         * The gap on the text side is twice the one on the glyph side: text ends on its last
+         * glyph's advance width, which carries a little trailing bearing, so an equal margin read
+         * as the rule crowding the line while it floated off the icons.
          */
         private const val STATUS_DIVIDER_W_DP = 1.2f
-        private const val STATUS_DIVIDER_GAP_DP = 3f
+        private const val STATUS_DIVIDER_TEXT_GAP_DP = 6f
+        private const val STATUS_DIVIDER_ICON_GAP_DP = 3f
 
         /** How far the card gives while the direction is still unknown. */
         private const val DRAG_GIVE_DP = 16f
@@ -366,10 +371,11 @@ class PillView(context: Context) : View(context) {
                 item.art != null -> glyphSize + dp(9f)
                 else -> 0f
             }
-            // The same gap is reserved on both sides of the hairline, so the fitted width matches
-            // where the rule and the glyphs are actually drawn.
+            // The same gaps are reserved as are drawn, so the fitted width matches where the
+            // rule and the glyphs actually land.
             val clusterW = if (statusGlyphs) {
-                statusClusterWidth(h) + statusDividerWidth() + dp(STATUS_DIVIDER_GAP_DP) * 2f
+                statusClusterWidth(h) + statusDividerWidth() +
+                    dp(STATUS_DIVIDER_TEXT_GAP_DP) + dp(STATUS_DIVIDER_ICON_GAP_DP)
             } else {
                 0f
             }
@@ -1064,7 +1070,7 @@ class PillView(context: Context) : View(context) {
             // The separator: a short rounded rule, dimmed so it groups the glyphs without
             // competing with the line of text next to it.
             val dividerW = statusDividerWidth()
-            val dividerRight = left - dp(STATUS_DIVIDER_GAP_DP)
+            val dividerRight = left - dp(STATUS_DIVIDER_ICON_GAP_DP)
             val dividerH = iconH * 0.9f
             val dividerTop = (h - dividerH) / 2f
             statusDivider.color = withAlpha(statusFill.color, 0x66)
@@ -1098,7 +1104,7 @@ class PillView(context: Context) : View(context) {
             }
             textRight = minOf(
                 textRight,
-                dividerRight - dividerW - dp(STATUS_DIVIDER_GAP_DP)
+                dividerRight - dividerW - dp(STATUS_DIVIDER_TEXT_GAP_DP)
             )
         }
 

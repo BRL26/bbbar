@@ -72,6 +72,9 @@ class NowBarHook : IXposedHookLoadPackage {
         const val KEY_HOOK_BEAT = "bbbar_hook_beat"
         private const val BEAT_MS = 30_000L
 
+        /** How often the Bluetooth audio state is read. Short, so a headset lands promptly. */
+        private const val BT_POLL_MS = 4_000L
+
         /**
          * 1 while SystemUI has the status bar hidden - a fullscreen or immersive app. bbbar's pill
          * is drawn in that same strip, so the service hides it with the bar and brings it back
@@ -107,6 +110,13 @@ class NowBarHook : IXposedHookLoadPackage {
          * pill can be given its own position there.
          */
         const val KEY_SHADE_OPEN = "bbbar_shade_open"
+
+        /**
+         * 1 while a Bluetooth audio device - earbuds, a headset - is connected. The pill draws its
+         * own earbuds glyph, and the app cannot ask Bluetooth itself without a runtime permission,
+         * so SystemUI answers here instead.
+         */
+        const val KEY_BT_AUDIO = "bbbar_bt_audio"
 
         /**
          * Verified on Nothing OS 5.0 (classes7.dex): `shade/NotificationShadeWindowControllerImpl`
@@ -208,6 +218,15 @@ class NowBarHook : IXposedHookLoadPackage {
     /** Last value pushed, so a burst of identical states costs no provider writes. */
     private var lastPublishedHidden: Boolean? = null
 
+    /** Last Bluetooth audio state published, -1 until the first read. */
+    private var lastBtAudio = -1
+
+    /** Set once the Bluetooth read turns out to be refused, so the log is written once. */
+    private var btRefused = false
+
+    /** Last Bluetooth read, so the profile query does not run on every tick. */
+    private var lastBtPoll = 0L
+
     /**
      * Publishes "the hook is running" into Settings.Global and keeps it fresh. SystemUI holds
      * WRITE_SECURE_SETTINGS on this build, so no extra permission or root is involved.
@@ -225,6 +244,12 @@ class NowBarHook : IXposedHookLoadPackage {
                         if (now - lastBeat >= BEAT_MS) {
                             lastBeat = now
                             Settings.Global.putLong(context.contentResolver, KEY_HOOK_BEAT, now)
+                        }
+                        // Kept off the heartbeat's slow rhythm: a headset is put on in seconds,
+                        // and the glyph should be there when the lock screen is looked at.
+                        if (now - lastBtPoll >= BT_POLL_MS) {
+                            lastBtPoll = now
+                            publishBluetoothAudio(context)
                         }
                     } catch (t: Throwable) {
                         Log.w("hook: heartbeat write failed", t)
@@ -310,6 +335,46 @@ class NowBarHook : IXposedHookLoadPackage {
         } catch (t: Throwable) {
             Log.w("hook: shade state push unavailable", t)
             false
+        }
+    }
+
+    /**
+     * Whether an audio device is connected, written for the app to observe.
+     *
+     * A2DP and the headset profile cover older gear, LE Audio the newer kind, and any of them
+     * connected means the earbuds glyph belongs on the strip. A refused read (no
+     * BLUETOOTH_CONNECT) leaves the value alone, so a missing permission means no glyph instead
+     * of a wrong one, and the app's own permission list stays untouched.
+     */
+    private fun publishBluetoothAudio(context: Context) {
+        try {
+            val adapter = context.getSystemService(android.bluetooth.BluetoothManager::class.java)
+                ?.adapter ?: return
+            val on = if (!adapter.isEnabled) {
+                0
+            } else {
+                val profiles = mutableListOf(
+                    android.bluetooth.BluetoothProfile.A2DP,
+                    android.bluetooth.BluetoothProfile.HEADSET
+                )
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    profiles.add(android.bluetooth.BluetoothProfile.LE_AUDIO)
+                }
+                val connected = profiles.any { profile ->
+                    adapter.getProfileConnectionState(profile) ==
+                        android.bluetooth.BluetoothProfile.STATE_CONNECTED
+                }
+                if (connected) 1 else 0
+            }
+            if (on == lastBtAudio) return
+            lastBtAudio = on
+            Settings.Global.putInt(context.contentResolver, KEY_BT_AUDIO, on)
+            Log.i("hook: bluetooth audio ${if (on == 1) "connected" else "off"}")
+        } catch (t: Throwable) {
+            if (!btRefused) {
+                btRefused = true
+                Log.w("hook: bluetooth state unreadable, no earbuds glyph", t)
+            }
         }
     }
 

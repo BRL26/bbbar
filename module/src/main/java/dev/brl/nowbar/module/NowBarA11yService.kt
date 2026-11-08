@@ -1273,7 +1273,14 @@ class NowBarA11yService : AccessibilityService() {
             clearLockPillSuppression()
             val t0 = SystemClock.uptimeMillis()
             removeLockPillNow()
-            if (sbPill == null) addSbPill(fadeIn = true)
+            val existing = sbPill
+            if (existing == null) {
+                addSbPill(fadeIn = true)
+            } else {
+                // The strip goes back to carrying the line, morphing out of the icon-only form.
+                existing.setStatusOnly(false)
+                fitSbWidth(existing)
+            }
             Log.i("unlock handover: lock window removed in ${SystemClock.uptimeMillis() - t0}ms (removeViewImmediate)")
             logFirstFrame("unlock handover", t0)
         } catch (t: Throwable) {
@@ -1286,7 +1293,6 @@ class NowBarA11yService : AccessibilityService() {
 
     /** Lock handover, also with no animation: status pill removed, keyguard pill put in place. */
     private fun transitionToLocked() {
-        if (sbPill == null && lockPill != null) return
         if (!handoverAllowed()) {
             scheduleResync()
             return
@@ -1294,14 +1300,25 @@ class NowBarA11yService : AccessibilityService() {
         transitioning = true
         handler.postDelayed({ transitioning = false }, 200L)
         try {
-            removeSbPillNow()
+            // The strip keeps its pill on the lock screen: there it is the phone's status icons
+            // (battery, network, Bluetooth), because the card at the bottom already carries the
+            // activity. It morphs into that form instead of being removed and put back.
+            val view = sbPill
+            if (view == null) {
+                if (!sbHidden && TuningStore.isOn(this, TuningStore.MASTER)) {
+                    addSbPill(fadeIn = true)
+                }
+            } else {
+                view.setStatusOnly(true)
+                view.setItems(emptyList(), false, 0)
+                fitSbWidth(view)
+            }
             // A window that was already over the keyguard keeps it away until it leaves.
             if (lockPill == null && !lockPillSuppressed) addLockPill(fadeIn = true)
-            Log.i("lock handover: status window removed, keyguard pill in place instantly")
+            Log.i("lock handover: status pill is the icon strip, keyguard pill in place instantly")
         } catch (t: Throwable) {
             Log.w("transitionToLocked failed", t)
             transitioning = false
-            removeSbPill()
             addLockPill(slideIn = false)
         }
     }
@@ -1824,17 +1841,27 @@ class NowBarA11yService : AccessibilityService() {
             view.setStyle(t.label, t.textDp, t.radiusDp)
             view.setOutlineMode(TuningStore.outline(this))
             // The inverse glyphs are part of the measured width, so set them before fitting.
+            view.setStatusOnly(lastLocked == true)
             view.setStatusGlyphs(
                 t.inverse,
                 batteryPct,
                 cellLevel(),
                 t.signalFirst,
-                Networks.kind(this)
+                Networks.kind(this),
+                bluetoothAudio()
             )
             // Content before the add, so the first frame is already the real item.
             view.setItems(NowBarState.items(this).take(1), false, 0)
             // A short line gets a short pill: the tuned width is the maximum, not a fixed size.
             lp.width = view.preferredWidth(sbMaxWidthPx(), lp.height)
+            // The edge was worked out for the *tuned* width, and a right-anchored layout puts the
+            // left edge where a pill that wide would start. Adding the narrower pill there left it
+            // that many pixels short of its margin, and the next re-place snapped it back - the
+            // jump on unlock. Place it for the width it is actually added with.
+            if (isLandscape() || t.inverse) {
+                lp.x = sbXFor(lp.width, t)
+                    .coerceIn(0, (screenWidthPx() - lp.width).coerceAtLeast(0))
+            }
             windowManager.addView(view, lp)
             sbPill = view
             sbParams = lp
@@ -1864,7 +1891,21 @@ class NowBarA11yService : AccessibilityService() {
             val lp = sbParams ?: return
             // The shade and the status bar show the same pill: always fit the line.
             val wanted = view.preferredWidth(sbMaxWidthPx(), lp.height)
-            if (lp.width == wanted && sbWidthAnimator?.isRunning != true) return
+            if (lp.width == wanted && sbWidthAnimator?.isRunning != true) {
+                // The width is already right, but the position may still belong to a different
+                // one (a pill placed before its line was measured). Nothing would ever correct
+                // that, so the right edge is put back on its margin here instead.
+                val ts = Tuning.sb(this)
+                if ((isLandscape() || ts.inverse) && !dragOwns(view)) {
+                    val x = sbXFor(lp.width, ts)
+                    if (x != lp.x) {
+                        lp.x = x
+                        windowManager.updateViewLayout(view, lp)
+                        Log.i("sb pill re-anchored: x=${lp.x} for width ${lp.width}px")
+                    }
+                }
+                return
+            }
             // Several preferences can land in the same applyAll: an animation already heading for
             // this width is left alone instead of being restarted from its current frame.
             if (wanted == sbWidthTarget && sbWidthAnimator?.isRunning == true) return
@@ -2641,7 +2682,7 @@ class NowBarA11yService : AccessibilityService() {
                 disarmAutoClose()
                 removePopup()
                 leaveSbPillWithBar()
-            } else if (lastLocked == false) {
+            } else {
                 sbLeavingWithBar = false
                 addSbPill(slideIn = true)
             }
@@ -2917,7 +2958,8 @@ class NowBarA11yService : AccessibilityService() {
                 batteryPct,
                 cellLevel(),
                 t.signalFirst,
-                Networks.kind(this)
+                Networks.kind(this),
+                bluetoothAudio()
             )
         } catch (t: Throwable) {
             Log.w("status glyph update failed", t)
@@ -2940,6 +2982,25 @@ class NowBarA11yService : AccessibilityService() {
         }
     } catch (t: Throwable) {
         -1
+    }
+
+    /**
+     * Whether a Bluetooth audio device is connected, as SystemUI last saw it.
+     *
+     * The app has no BLUETOOTH_CONNECT of its own - an accessibility service cannot ask for one -
+     * so the hook answers from inside SystemUI. A stale hook means "no earbuds": drawing one for a
+     * device that may have been put away is worse than not drawing it.
+     */
+    private fun bluetoothAudio(): Boolean {
+        return try {
+            val beat = Settings.Global.getLong(contentResolver, NowBarHook.KEY_HOOK_BEAT, 0L)
+            val fresh = beat > 0L &&
+                abs(SystemClock.elapsedRealtime() - beat) < HOOK_STALE_MS
+            fresh && Settings.Global.getInt(contentResolver, NowBarHook.KEY_BT_AUDIO, 0) == 1
+        } catch (t: Throwable) {
+            Log.w("bluetooth state unreadable", t)
+            false
+        }
     }
 
     private fun readStatusBarHidden(): Boolean {
@@ -3152,10 +3213,11 @@ class NowBarA11yService : AccessibilityService() {
                     removeLockPill()
                     removePopup()
                 }
-                // The status pill stays on the strip for as long as the phone is unlocked: with
-                // nothing active it is the idle line, or just its own battery / signal glyphs.
-                val keepSb = TuningStore.isOn(this, TuningStore.MASTER) && lastLocked != true
+                // The status pill stays on the strip whatever the keyguard is doing: with nothing
+                // active it is the idle line, or on the lock screen just its own icons.
+                val keepSb = TuningStore.isOn(this, TuningStore.MASTER)
                 if (!keepSb) removeSbPill() else sbPill?.let { view ->
+                    view.setStatusOnly(lastLocked == true)
                     view.setItems(emptyList(), false, 0)
                     // Back to the idle line: the pill has to shrink with it, otherwise it keeps
                     // the width of the card that just went away.
@@ -3238,7 +3300,11 @@ class NowBarA11yService : AccessibilityService() {
     private fun ensureSurface() {
         if (transitioning) return
         when (lastLocked) {
-            true -> if (lockPill == null) addLockPill(fadeIn = true)
+            true -> {
+                if (lockPill == null) addLockPill(fadeIn = true)
+                // The strip carries the phone's status icons on the lock screen too.
+                if (sbPill == null && !sbHidden) addSbPill(fadeIn = true)
+            }
             false -> if (sbPill == null) addSbPill(fadeIn = true)
             null -> Unit
         }

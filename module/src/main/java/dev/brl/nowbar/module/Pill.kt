@@ -102,6 +102,12 @@ class PillView(context: Context) : View(context) {
         /** How far the finger has to go, and by how much it must dominate, to lock an axis. */
         private const val DRAG_LOCK_DP = 12f
         private const val DRAG_LOCK_RATIO = 1.25f
+
+        /** How long the pill takes to morph between its line and its icons-only lock form. */
+        private const val STATUS_ONLY_MS = 260L
+
+        /** KDE Connect: the media pill shows a play button instead of this app's icon. */
+        private const val KDE_CONNECT_PKG = "org.kde.kdeconnect"
     }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -139,6 +145,23 @@ class PillView(context: Context) : View(context) {
         strokeJoin = Paint.Join.ROUND
     }
     private val statusFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+
+    /** Scratch rect for the earbuds' stems, so the glyph costs no allocation per frame. */
+    private val statusStem = RectF()
+
+    /** Inverts whatever is drawn through it, for the AOD's light-on-black icons. */
+    private val aodInvertPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        colorFilter = ColorMatrixColorFilter(
+            ColorMatrix(
+                floatArrayOf(
+                    -1f, 0f, 0f, 0f, 255f,
+                    0f, -1f, 0f, 0f, 255f,
+                    0f, 0f, -1f, 0f, 255f,
+                    0f, 0f, 0f, 1f, 0f
+                )
+            )
+        )
+    }
     private val statusDim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val scrim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val tintLayer = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
@@ -294,6 +317,14 @@ class PillView(context: Context) : View(context) {
     /** Last status-bar geometry that was logged, so the numbers are printed once per change. */
     private var sbGeomLogged = ""
 
+    /** Bluetooth audio is connected, so the cluster carries the earbuds glyph. */
+    private var btBuds = false
+
+    /** Where [setStatusOnly] is heading, and the animated mix the drawing follows. */
+    private var statusOnlyTarget = false
+    private var statusOnlyMix = 0f
+    private var statusOnlyAnimator: ValueAnimator? = null
+
     /** 0 = full colour, 1 = greyscale. The AOD asks for 1 and the wake fades it back. */
     private var gray = 0f
     private var grayAnimator: ValueAnimator? = null
@@ -360,6 +391,12 @@ class PillView(context: Context) : View(context) {
             if (h <= 0f) return maxWidthPx
             val r = minOf(dp(radiusOverrideDp), h / 2f)
             val pad = (dp(11f) + r * 0.12f).coerceAtMost(h / 3f)
+            // The lock screen's pill carries no line, so it is only as wide as its glyphs.
+            if (statusOnlyTarget) {
+                val iconOnly = (pad * 2f + statusClusterWidth(h) + dp(1f)).toInt()
+                val floor = minOf(heightPx, maxWidthPx)
+                return iconOnly.coerceIn(floor, maxWidthPx)
+            }
             val glyphSize = (h - pad * 2f).coerceAtMost(dp(34f)).coerceAtLeast(dp(14f))
             val item = frontItem
             val text = when {
@@ -373,7 +410,9 @@ class PillView(context: Context) : View(context) {
             val iconW = when {
                 item == null -> 0f
                 item.kind == ItemKind.MEDIA ->
-                    if (appIcon(item.packageName.orEmpty()) != null) glyphSize + dp(9f) else 0f
+                    if (isKdeConnect(item.packageName.orEmpty()) ||
+                        appIcon(item.packageName.orEmpty()) != null
+                    ) glyphSize + dp(9f) else 0f
                 item.kind == ItemKind.TIMER || item.kind == ItemKind.ALARM ||
                     item.kind == ItemKind.LIVE -> glyphSize + dp(9f)
                 item.art != null -> glyphSize + dp(9f)
@@ -490,13 +529,14 @@ class PillView(context: Context) : View(context) {
         battery: Int,
         signal: Int,
         signalFirst: Boolean = false,
-        network: Int = Networks.MOBILE
+        network: Int = Networks.MOBILE,
+        buds: Boolean = false
     ) {
         try {
             val b = battery.coerceIn(-1, 100)
             val s = signal.coerceIn(-1, 4)
             if (on == statusGlyphs && b == batteryPct && s == signalLevel &&
-                signalFirst == statusSignalFirst && network == networkKind
+                signalFirst == statusSignalFirst && network == networkKind && buds == btBuds
             ) {
                 return
             }
@@ -505,10 +545,49 @@ class PillView(context: Context) : View(context) {
             signalLevel = s
             statusSignalFirst = signalFirst
             networkKind = network
+            btBuds = buds
             invalidate()
         } catch (t: Throwable) {
             Log.w("PillView.setStatusGlyphs threw", t)
         }
+    }
+
+    /**
+     * The lock screen's pill: the glyphs only, in the middle of the shape, with the line faded out.
+     *
+     * The bottom card already carries the activity there, so the strip just stands in for the
+     * phone's own battery / signal / Bluetooth icons. The change is animated rather than swapped,
+     * so locking morphs the pill instead of replacing it.
+     */
+    fun setStatusOnly(on: Boolean) {
+        try {
+            if (on == statusOnlyTarget) return
+            statusOnlyTarget = on
+            cancelStatusOnlyAnimator()
+            val from = statusOnlyMix
+            val to = if (on) 1f else 0f
+            val anim = ValueAnimator.ofFloat(from, to).apply {
+                duration = STATUS_ONLY_MS
+                interpolator = DecelerateInterpolator(1.6f)
+                addUpdateListener {
+                    statusOnlyMix = it.animatedValue as Float
+                    invalidate()
+                }
+            }
+            statusOnlyAnimator = anim
+            anim.start()
+        } catch (t: Throwable) {
+            Log.w("PillView.setStatusOnly threw", t)
+        }
+    }
+
+    private fun cancelStatusOnlyAnimator() {
+        try {
+            statusOnlyAnimator?.cancel()
+        } catch (t: Throwable) {
+            Log.w("status-only animator cancel failed", t)
+        }
+        statusOnlyAnimator = null
     }
 
     /** Applies the measure-mode outline (see [outlineOnly]). */
@@ -536,12 +615,42 @@ class PillView(context: Context) : View(context) {
         }
     }
 
-    /** Width the battery + gap + network cluster takes, for fitting the pill to its line. */
+    /** Width the earbuds take, or nothing when no Bluetooth audio device is connected. */
+    private fun statusBudsWidth(cardH: Float): Float =
+        if (btBuds) statusIconHeight(cardH) * 1.05f else 0f
+
+    /** Width the buds + battery + network cluster takes, for fitting the pill to its line. */
     private fun statusClusterWidth(cardH: Float): Float {
         val iconH = statusIconHeight(cardH)
         val netW = statusNetworkWidth(cardH)
         val gap = if (netW > 0f) (iconH * 0.4f).coerceAtLeast(dp(2f)) else 0f
-        return iconH * 1.5f + gap + netW
+        val budsW = statusBudsWidth(cardH)
+        val budsGap = if (budsW > 0f) (iconH * 0.4f).coerceAtLeast(dp(2f)) else 0f
+        return budsW + budsGap + iconH * 1.5f + gap + netW
+    }
+
+    /**
+     * A pair of earbuds, the way the strip draws them: two buds, each a round body with a short
+     * stem, mirrored so they read as a set rather than as two blobs.
+     */
+    private fun drawBuds(canvas: Canvas, area: RectF) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            val h = area.height()
+            val bodyR = h * 0.21f
+            val stemW = bodyR * 1.15f
+            val bodyCy = area.top + h * 0.40f
+            val stemBottom = area.top + h * 0.94f
+            for (dir in intArrayOf(-1, 1)) {
+                val cx = area.centerX() + dir * area.width() * 0.20f
+                canvas.drawCircle(cx, bodyCy, bodyR, statusFill)
+                val stemLeft = cx + dir * bodyR * 0.15f - stemW / 2f
+                statusStem.set(stemLeft, bodyCy, stemLeft + stemW, stemBottom)
+                canvas.drawRoundRect(statusStem, stemW / 2f, stemW / 2f, statusFill)
+            }
+        } catch (t: Throwable) {
+            Log.w("PillView.drawBuds failed", t)
+        }
     }
 
     /** Room the separator between the line and the cluster takes. */
@@ -994,7 +1103,10 @@ class PillView(context: Context) : View(context) {
         // keeps the full height to centre itself in.
         val dense = h < dp(44f)
         val barH = if (dense) dp(2f) else dp(3f)
-        val showBar = item != null && item.progress >= 0f
+        // No strip of progress under the lock screen's icon-only pill: it carries the phone's
+        // status icons and nothing else there.
+        val showBar = item != null && item.progress >= 0f &&
+            !(statusGlyphs && statusOnlyMix > 0.5f)
         val barTop = h - barH
         val contentBottom = h
 
@@ -1004,24 +1116,36 @@ class PillView(context: Context) : View(context) {
         // not parked at the top padding: the icon used to sit visibly high in the pill.
         val glyphTop = ((contentBottom - glyphSize) / 2f).coerceAtLeast(0f)
         val glyphRect = RectF(pad, glyphTop, pad + glyphSize, glyphTop + glyphSize)
-        when (item?.kind) {
-            ItemKind.TIMER -> {
+        // The lock screen's icon-only pill has no room for a leading glyph - the shape narrows
+        // around the status icons - so it goes with the line.
+        val hideLeading = statusGlyphs && statusOnlyMix > 0.5f
+        when {
+            hideLeading -> Unit
+            item?.kind == ItemKind.TIMER -> {
                 drawClock(canvas, glyphRect)
                 iconDrawn = true
             }
-            ItemKind.ALARM -> {
+            item?.kind == ItemKind.ALARM -> {
                 drawBell(canvas, glyphRect)
                 iconDrawn = true
             }
-            ItemKind.LIVE -> {
+            item?.kind == ItemKind.LIVE -> {
                 drawLiveDot(canvas, glyphRect)
                 iconDrawn = true
             }
-            ItemKind.MEDIA -> {
-                val icon = appIcon(item?.packageName.orEmpty())
-                if (icon != null) {
-                    drawAppIcon(canvas, icon, glyphRect, glyphSize * 0.28f)
+            item?.kind == ItemKind.MEDIA -> {
+                val pkg = item?.packageName.orEmpty()
+                if (isKdeConnect(pkg)) {
+                    // KDE Connect's launcher icon is a phone with a plug: at 13 dp it reads as a
+                    // smudge. A play button says "this is the thing playing" instead.
+                    drawPlayButton(canvas, glyphRect)
                     iconDrawn = true
+                } else {
+                    val icon = appIcon(pkg)
+                    if (icon != null) {
+                        drawAppIcon(canvas, icon, glyphRect, glyphSize * 0.28f)
+                        iconDrawn = true
+                    }
                 }
             }
             else -> {
@@ -1097,15 +1221,27 @@ class PillView(context: Context) : View(context) {
             val batteryW = iconH * 1.5f
             val networkW = statusNetworkWidth(h)
             val gap = (iconH * 0.4f).coerceAtLeast(dp(2f))
-            val right = w - pad
-            val left = right - statusClusterWidth(h)
+            val clusterW = statusClusterWidth(h)
+            // Right end of the strip when the pill is carrying a line; the middle of the shape when
+            // it is the lock screen's icon-only pill. The morph slides between the two.
+            val lineLeft = w - pad - clusterW
+            val centeredLeft = (w - clusterW) / 2f
+            val left = lineLeft + (centeredLeft - lineLeft) * statusOnlyMix
             val top = (h - iconH) / 2f
+            // The line fades out as the glyphs take the middle, so a lock morphs rather than swaps.
+            val textFade = (1f - statusOnlyMix).coerceIn(0f, 1f)
             // The separator: a short rounded rule, dimmed so it groups the glyphs without
             // competing with the line of text next to it. It is placed halfway between the end of
             // the text's ink and the glyphs, so the space reads the same on both sides - fixed
             // margins never did, because a line ends on its advance width and that carries a
             // trailing bearing wider than the space a margin was meant to leave.
             val dividerW = statusDividerWidth()
+            // The line has to stop where the rule's own room starts. Clamping to the pill's padding
+            // instead let a long title run underneath the glyphs, because the measured end of the
+            // line was already past the cluster and the clamp had nothing left to cut.
+            val lineLimit = (left - dividerW - dp(STATUS_DIVIDER_GAP_DP) * 2f)
+                .coerceAtLeast(textLeft)
+            textRight = minOf(textRight, lineLimit)
 
             val textEnd = (textLeft + titlePaint.measureText(title)).coerceAtMost(textRight)
             // The gap is measured from the line's *ink*, not from its advance width: the advance
@@ -1129,28 +1265,39 @@ class PillView(context: Context) : View(context) {
             }
             val dividerH = iconH * 0.9f
             val dividerTop = (h - dividerH) / 2f
-            statusDivider.color = withAlpha(statusFill.color, 0x66)
-            canvas.drawRoundRect(
-                RectF(dividerLeft, dividerTop, dividerRight, dividerTop + dividerH),
-                dividerW / 2f,
-                dividerW / 2f,
-                statusDivider
-            )
+            // The rule belongs to the line, so it goes with it.
+            if (textFade > 0.01f) {
+                statusDivider.color = withAlpha(statusFill.color, (0x66 * textFade).toInt())
+                canvas.drawRoundRect(
+                    RectF(dividerLeft, dividerTop, dividerRight, dividerTop + dividerH),
+                    dividerW / 2f,
+                    dividerW / 2f,
+                    statusDivider
+                )
+            }
+            // Earbuds lead the cluster when a Bluetooth audio device is connected, the way the
+            // phone's own strip puts them beside the battery.
+            var cursor = left
+            val budsW = statusBudsWidth(h)
+            if (budsW > 0f) {
+                drawBuds(canvas, RectF(cursor, top, cursor + budsW, top + iconH))
+                cursor += budsW + gap
+            }
             // Which glyph leads is the owner's choice: the two swap places, the cluster does not.
             // With no connection there is no network glyph at all, just the battery.
             if (statusSignalFirst) {
                 if (networkW > 0f) {
-                    drawNetwork(canvas, RectF(left, top, left + networkW, top + iconH))
+                    drawNetwork(canvas, RectF(cursor, top, cursor + networkW, top + iconH))
                 }
-                val batteryLeft = left + networkW + (if (networkW > 0f) gap else 0f)
+                val batteryLeft = cursor + networkW + (if (networkW > 0f) gap else 0f)
                 drawBattery(
                     canvas,
                     RectF(batteryLeft, top, batteryLeft + batteryW, top + iconH),
                     batteryPct
                 )
             } else {
-                drawBattery(canvas, RectF(left, top, left + batteryW, top + iconH), batteryPct)
-                val networkLeft = left + batteryW + gap
+                drawBattery(canvas, RectF(cursor, top, cursor + batteryW, top + iconH), batteryPct)
+                val networkLeft = cursor + batteryW + gap
                 if (networkW > 0f) {
                     drawNetwork(
                         canvas,
@@ -1173,6 +1320,12 @@ class PillView(context: Context) : View(context) {
 
         val gap = dp(1f)
         val seekRow = if (showSeek) dp(SEEK_ROW_DP) else 0f
+        // The text fades with the morph, so it is scaled here rather than skipped.
+        val textFade = if (statusGlyphs) (1f - statusOnlyMix).coerceIn(0f, 1f) else 1f
+        val titleAlpha = titlePaint.alpha
+        val subtitleAlpha = subtitlePaint.alpha
+        titlePaint.alpha = (titleAlpha * textFade).toInt()
+        subtitlePaint.alpha = (subtitleAlpha * textFade).toInt()
         val block = titlePaint.textSize +
             (if (showSubtitle) gap + subtitlePaint.textSize else 0f) + seekRow
         val top = ((contentBottom - block) / 2f).coerceAtLeast(dp(2f))
@@ -1207,6 +1360,8 @@ class PillView(context: Context) : View(context) {
         if (showSeek && item != null) {
             drawSeekRow(canvas, item, textLeft, lineBottom + dp(1f), available)
         }
+        titlePaint.alpha = titleAlpha
+        subtitlePaint.alpha = subtitleAlpha
 
         // The line style draws the progress as the bar's own checkerboard instead.
         if (showBar && !seekVisible && !lineStyle && item != null) {
@@ -1457,6 +1612,36 @@ class PillView(context: Context) : View(context) {
      * The player's own launcher icon, next to the line so it is clear which app is playing.
      * Looked up once per package: `getApplicationIcon` goes through the package manager.
      */
+    /** KDE Connect answers with a play button instead of its own icon; see the media branch. */
+    private fun isKdeConnect(pkg: String): Boolean =
+        pkg.startsWith(KDE_CONNECT_PKG)
+
+    /**
+     * A filled play triangle, the mark the pill shows for KDE Connect.
+     *
+     * Sized to the glyph slot rather than to a line of text, so it sits at the same weight as the
+     * clock and the bell beside it.
+     */
+    private fun drawPlayButton(canvas: Canvas, area: RectF) {
+        try {
+            if (area.width() <= 0f || area.height() <= 0f) return
+            val s = minOf(area.width(), area.height())
+            val cx = area.centerX()
+            val cy = area.centerY()
+            val half = s * 0.30f
+            val triangle = Path()
+            triangle.moveTo(cx - half * 0.8f, cy - half)
+            triangle.lineTo(cx + half, cy)
+            triangle.lineTo(cx - half * 0.8f, cy + half)
+            triangle.close()
+            glyph.style = Paint.Style.FILL
+            canvas.drawPath(triangle, glyph)
+            glyph.style = Paint.Style.STROKE
+        } catch (t: Throwable) {
+            Log.w("PillView play button failed", t)
+        }
+    }
+
     private fun appIcon(pkg: String): Drawable? {
         if (pkg.isBlank()) return null
         if (appIcons.containsKey(pkg)) return appIcons[pkg]
@@ -1473,21 +1658,36 @@ class PillView(context: Context) : View(context) {
     private fun drawAppIcon(canvas: Canvas, icon: Drawable, area: RectF, radius: Float) {
         canvas.save()
         try {
-            artClip.reset()
-            artClip.addRoundRect(area, radius, radius, Path.Direction.CW)
-            canvas.clipPath(artClip)
-            icon.setBounds(
-                area.left.toInt(),
-                area.top.toInt(),
-                area.right.toInt(),
-                area.bottom.toInt()
-            )
-            icon.draw(canvas)
+            // The AOD is light dots on black: an icon left as it is would be a dark smudge there,
+            // so it is inverted to the same weight as the text beside it.
+            if (lineStyle) {
+                canvas.saveLayer(area, aodInvertPaint)
+                try {
+                    drawClippedIcon(canvas, icon, area, radius)
+                } finally {
+                    canvas.restore()
+                }
+            } else {
+                drawClippedIcon(canvas, icon, area, radius)
+            }
         } catch (t: Throwable) {
             Log.w("PillView app icon failed", t)
         } finally {
             canvas.restore()
         }
+    }
+
+    private fun drawClippedIcon(canvas: Canvas, icon: Drawable, area: RectF, radius: Float) {
+        artClip.reset()
+        artClip.addRoundRect(area, radius, radius, Path.Direction.CW)
+        canvas.clipPath(artClip)
+        icon.setBounds(
+            area.left.toInt(),
+            area.top.toInt(),
+            area.right.toInt(),
+            area.bottom.toInt()
+        )
+        icon.draw(canvas)
     }
 
     /**

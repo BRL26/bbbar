@@ -215,7 +215,7 @@ SystemUI publishes, keeps its right edge fixed and opens its expanded card centr
 The glyphs are separated from the line by a short rounded hairline. The network glyph follows the
 connection: Wi-Fi when the phone is on Wi-Fi (even with mobile data also up), the cellular bars when
 only mobile data is up, and nothing at all when it is offline - the battery is always drawn. Which
-glyph leads is a setting (`statusIconOrder`, battery first by default).
+glyph leads is a setting (`statusIconOrder`, signal first by default).
 
 The camera / microphone privacy indicator lives in that corner, and its own window is above the
 overlay, so it would sit on top of the pill. While the right-end layout is on, the hook hides it

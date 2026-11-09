@@ -797,38 +797,6 @@ class SettingsActivity : AppCompatActivity() {
                 TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL to "Clock + text"
             )
         ) { refreshPreviews() }
-        val hidden = card(
-            "What the hook hides",
-            "One choice per element; the pill only draws its own copy of what it replaced"
-        )
-        switchRow(
-            hidden,
-            "Android's clock",
-            "Used by the clock-less left side. Off keeps the time where it is.",
-            TuningStore.hookHideClock(this)
-        ) { on ->
-            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLOCK, on).apply()
-            pushHookLayout()
-        }
-        switchRow(
-            hidden,
-            "Battery / network icons",
-            "Used by the right side. Off leaves Android's own cluster in place.",
-            TuningStore.hookHideCluster(this)
-        ) { on ->
-            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLUSTER, on).apply()
-            pushHookLayout()
-            refreshPreviews()
-        }
-        switchRow(
-            hidden,
-            "Privacy indicator",
-            "Used by the right side. Off leaves the camera / microphone dot visible.",
-            TuningStore.hookHidePrivacy(this)
-        ) { on ->
-            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_PRIVACY, on).apply()
-            pushHookLayout()
-        }
         choiceRow(
             body,
             "Battery / signal order",
@@ -1145,6 +1113,36 @@ class SettingsActivity : AppCompatActivity() {
             "The system's own Live Update chips (bbbar's cards stay)",
             NowBarHook.KEY_HIDE_CHIPS
         )
+        // The other three hook switches are per placement element: they live here with the hook's
+        // own status row, instead of at the bottom of the strip page where they were unfindable.
+        switchRow(
+            body,
+            "Hide Android's clock",
+            "The clock-less left side: the pill draws the time instead",
+            TuningStore.hookHideClock(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLOCK, on).apply()
+            pushHookLayout()
+        }
+        switchRow(
+            body,
+            "Hide battery / network icons",
+            "The right side: the pill draws its own battery and signal",
+            TuningStore.hookHideCluster(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLUSTER, on).apply()
+            pushHookLayout()
+            refreshPreviews()
+        }
+        switchRow(
+            body,
+            "Hide the privacy indicator",
+            "The right side: the camera / microphone dot would sit on the pill",
+            TuningStore.hookHidePrivacy(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_PRIVACY, on).apply()
+            pushHookLayout()
+        }
         captionView(
             body,
             "Needs the bbbar module enabled for com.android.systemui in LSPosed, and one SystemUI " +

@@ -632,11 +632,18 @@ class SettingsActivity : AppCompatActivity() {
             isChecked = TuningStore.isOn(this@SettingsActivity, TuningStore.MASTER)
             setOnCheckedChangeListener { _, on ->
                 prefs.edit().putBoolean(TuningStore.MASTER, on).apply()
+                if (on) AllOff.on(this@SettingsActivity) else AllOff.off(this@SettingsActivity)
             }
         }
         hero.addView(masterSwitch, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         body.addView(hero, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        captionView(body, "The switches for the service and the hook are under Debug.")
+        captionView(
+            body,
+            "Off stops the bar and everything bbbar runs in the background: the root keeper, the " +
+                "keyguard log stream and the watchdog. The accessibility permission stays as it " +
+                "is, so turning it back on needs nothing else. The switches for the service and " +
+                "the hook are under Debug."
+        )
     }
 
     /**
@@ -790,6 +797,38 @@ class SettingsActivity : AppCompatActivity() {
                 TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL to "Clock + text"
             )
         ) { refreshPreviews() }
+        val hidden = card(
+            "What the hook hides",
+            "One choice per element; the pill only draws its own copy of what it replaced"
+        )
+        switchRow(
+            hidden,
+            "Android's clock",
+            "Used by the clock-less left side. Off keeps the time where it is.",
+            TuningStore.hookHideClock(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLOCK, on).apply()
+            pushHookLayout()
+        }
+        switchRow(
+            hidden,
+            "Battery / network icons",
+            "Used by the right side. Off leaves Android's own cluster in place.",
+            TuningStore.hookHideCluster(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_CLUSTER, on).apply()
+            pushHookLayout()
+            refreshPreviews()
+        }
+        switchRow(
+            hidden,
+            "Privacy indicator",
+            "Used by the right side. Off leaves the camera / microphone dot visible.",
+            TuningStore.hookHidePrivacy(this)
+        ) { on ->
+            prefs.edit().putBoolean(TuningStore.HOOK_HIDE_PRIVACY, on).apply()
+            pushHookLayout()
+        }
         choiceRow(
             body,
             "Battery / signal order",
@@ -876,13 +915,20 @@ class SettingsActivity : AppCompatActivity() {
      * the clock-less left layout.
      */
     private fun pushHookLayout() {
-        val side = TuningStore.sbSide(this)
-        val inverse = if (side == TuningStore.SB_SIDE_RIGHT) 1 else 0
-        val clock = if (side == TuningStore.SB_SIDE_LEFT_NO_CLOCK) 1 else 0
+        val inverse = if (TuningStore.sbInverse(this)) 1 else 0
+        // The clock is only hidden by the clock-less left side, and each element also needs its
+        // own switch (issue #12), so a visible element stays visible.
+        val clock = if (TuningStore.sbClockHidden(this) && TuningStore.hookHideClock(this)) 1 else 0
+        val cluster = if (inverse == 1 && TuningStore.hookHideCluster(this)) 1 else 0
+        val privacy = if (inverse == 1 && TuningStore.hookHidePrivacy(this)) 1 else 0
         Thread {
             RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $inverse")
             RootShell.run("settings put global ${NowBarHook.KEY_HIDE_CLOCK} $clock")
-            runOnUiThread { Log.i("strip flags: inverse=$inverse hideClock=$clock") }
+            RootShell.run("settings put global ${NowBarHook.KEY_HIDE_SYS_ICONS} $cluster")
+            RootShell.run("settings put global ${NowBarHook.KEY_HIDE_PRIVACY} $privacy")
+            runOnUiThread {
+                Log.i("strip flags: inverse=$inverse clock=$clock cluster=$cluster privacy=$privacy")
+            }
         }.start()
     }
 

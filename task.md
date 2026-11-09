@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.1.0, published** (`github.com/BRL26/bbbar`, tag `v2.1.0`). Base is settled: the accessibility
+**v2.2.0** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -21,6 +21,31 @@ Enable / disable:
   ```
 
 ## Done (verified on the device)
+
+### 2.2.0 — hook choices, AOD colour, all-off, handover
+- [x] **Issue #12: what the hook hides is a choice per element.** **Look → Status bar pill → What
+      the hook hides** has Android's clock, the battery / network cluster and the privacy indicator.
+      The hook reads `bbbar_hide_clock`, `bbbar_hide_sys_icons` and `bbbar_hide_privacy`; a missing
+      key follows the placement, so old installs behave exactly as before. Showing the cluster also
+      stops the pill drawing its own battery / network glyphs (`sbDrawsStatusGlyphs`), because there
+      is nothing left to replace.
+- [x] **Issue #11: the AOD mark stays grayscale.** Only the pixels a progress dot covers are
+      one-bit, and they flip the colour the mark rounds to on a black-and-white copy of itself -
+      a light pixel gets a dark dot, a dark pixel a light one. App icons read as themselves instead
+      of as a solid block.
+- [x] **All-off is one switch.** The master switch stops the bar, the root keeper loop, the
+      keyguard logcat stream and the watchdog alarm, and stops the service's timers. The
+      accessibility permission is left alone - it is the app's grant, not a session's - so turning
+      it back on does not need system settings.
+- [x] **The idle line survives a boot or a reinstall.** The status pill only drew its placeholder
+      once an unlock had been marked, but a poll-confirmed unlock never marked one - so after a
+      boot, or a service start on an already-unlocked phone, the pill drew an empty capsule.
+      `updateSurfaces` now marks any confirmed unlock, and a service that starts unlocked counts
+      as having had its unlock. Verified `5:36 PM :)` in the pill after reinstalling.
+- [x] **Unlock handover cannot blink.** A `locked` read inside the 800 ms post-unlock trust window
+      is ignored by the poll, the accessibility event, the keyguard listener, `updateSurfaces`, the
+      watchdog and `addLockPill`; `transitionToLocked` refuses to reverse a handover in that window;
+      and a second unlock trigger within 600 ms no longer tears the pill down again.
 
 ### 2.1.0 — strip placement and the pill's clock
 - [x] **Placement is a real choice**: **Right** (Android's battery / network corner, the inverse

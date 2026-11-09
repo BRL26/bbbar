@@ -318,6 +318,30 @@ object TuningStore {
     }
 
     /**
+     * What the Xposed hook is allowed to hide in Android's strip (issue #12). Each element is a
+     * choice of its own, and only takes effect where the layout uses it: the clock for the
+     * clock-less left side, the battery / network cluster and the privacy indicator for the
+     * right-hand layout. Showing one leaves Android's own in place, and the pill drops the glyphs
+     * it only drew because it had replaced them.
+     */
+    const val HOOK_HIDE_CLOCK = "hookHideClock"
+    const val HOOK_HIDE_CLUSTER = "hookHideCluster"
+    const val HOOK_HIDE_PRIVACY = "hookHidePrivacy"
+
+    fun hookHideClock(context: Context): Boolean = isOn(context, HOOK_HIDE_CLOCK)
+
+    fun hookHideCluster(context: Context): Boolean = isOn(context, HOOK_HIDE_CLUSTER)
+
+    fun hookHidePrivacy(context: Context): Boolean = isOn(context, HOOK_HIDE_PRIVACY)
+
+    /**
+     * True while the pill draws the strip's battery / signal itself - i.e. only while it is on
+     * the right and Android's own cluster is actually hidden.
+     */
+    fun sbDrawsStatusGlyphs(context: Context): Boolean =
+        sbInverse(context) && hookHideCluster(context)
+
+    /**
      * Measure mode: every surface is drawn as an empty outline with no content, and a surface
      * stays up even with nothing active, so sizes, edges and corner radii can be dialled in
      * against the real screen instead of a preview.
@@ -405,6 +429,9 @@ object TuningStore {
         e.putBoolean(AOD_LINE_STYLE, true)
         e.putBoolean(SCROLL_TEXT, true)
         e.putBoolean(OUTLINE, DEFAULT_OUTLINE)
+        e.putBoolean(HOOK_HIDE_CLOCK, true)
+        e.putBoolean(HOOK_HIDE_CLUSTER, true)
+        e.putBoolean(HOOK_HIDE_PRIVACY, true)
         e.putString(SB_SIDE, DEFAULT_SB_SIDE)
         e.putString(IDLE_CONTENT, DEFAULT_IDLE_CONTENT)
 

@@ -19,10 +19,14 @@ class NowBarApp : Application() {
         // geometry from the old layout can leave a surface half-configured.
         Log.i("app: onCreate (config ${TuningStore.CONFIG_VERSION})")
         TuningStore.maybeRewrite(this)
-        // Started from here so the check is armed whichever way the app comes up, including the
-        // launch after the system restored the accessibility service.
-        NowBarWatchdog.schedule(this)
-        // The loop outlives this process, so a crash cannot leave the pill switched off.
-        RootKeeper.startAsync()
+        // With everything off, nothing of bbbar is meant to wake the phone or hold a root shell,
+        // so both helpers stay unarmed until the switch is turned back on.
+        if (TuningStore.isOn(this, TuningStore.MASTER)) {
+            // Started from here so the check is armed whichever way the app comes up, including
+            // the launch after the system restored the accessibility service.
+            NowBarWatchdog.schedule(this)
+            // The loop outlives this process, so a crash cannot leave the pill switched off.
+            RootKeeper.startAsync()
+        }
     }
 }

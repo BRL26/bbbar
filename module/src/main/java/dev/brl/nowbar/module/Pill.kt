@@ -219,8 +219,12 @@ class PillView(context: Context) : View(context) {
     }
 
     /**
-     * Rounds every pixel of the glyph to black or white, then flips the ones the dot lattice
-     * covers: the mark inverts in dots, the way the AOD line does.
+     * Turns the glyph into grayscale and flips the pixels the dot lattice covers: the mark keeps
+     * its shading, the way a colour photo does in a newspaper, and the dots are the progress.
+     *
+     * The dots invert against a black-and-white round of the glyph, not against the grayscale one:
+     * a light pixel gets a dark dot and a dark pixel a light one, so the lattice is legible on a
+     * mostly-dark icon and on a mostly-light one (issue #11).
      */
     private fun aodRoundAndInvert(bmp: Bitmap, leftInCard: Float, filledRight: Float) {
         try {
@@ -241,10 +245,13 @@ class PillView(context: Context) : View(context) {
                         val g = (c shr 8) and 0xFF
                         val b = c and 0xFF
                         val lum = (r * 299 + g * 587 + b * 114) / 1000
-                        var v = if (lum >= 128) 0xFF else 0
                         val played = leftInCard + x <= filledRight
-                        if (played && inAodDot(x.toFloat(), y.toFloat(), cell, radius)) {
-                            v = 0xFF - v
+                        // Only a dotted pixel is one-bit; every other pixel keeps the mark's own
+                        // grayscale value, so an app icon still looks like itself on the AOD.
+                        val v = if (played && inAodDot(x.toFloat(), y.toFloat(), cell, radius)) {
+                            0xFF - (if (lum >= 128) 0xFF else 0)
+                        } else {
+                            lum
                         }
                         px[i] = (a shl 24) or (v shl 16) or (v shl 8) or v
                     }

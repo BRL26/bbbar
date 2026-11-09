@@ -306,6 +306,9 @@ class NowBarA11yService : AccessibilityService() {
     /** uptimeMillis of the last completed handover, to swallow duplicated triggers. */
     private var lastHandoverAt = 0L
 
+    /** uptimeMillis of the last unlock handover, so its duplicate triggers are one handover. */
+    private var lastUnlockHandoverAt = 0L
+
     /** Last surface mismatch the watchdog saw, and how often it has repeated. */
     private var watchSignature = ""
     private var watchStreak = 0
@@ -541,14 +544,18 @@ class NowBarA11yService : AccessibilityService() {
             registerLockStateListener()
             startRootWatcher()
             lastLocked = isKeyguardLocked()
-            unlockedOnce = unlockSeenThisBoot()
+            // A service that starts while the phone is already unlocked has had its unlock for
+            // this boot: without this the pill stayed blank until the next lock cycle, because the
+            // marker is only written by an unlock the service itself saw.
+            unlockedOnce = unlockSeenThisBoot() || lastLocked != true
             if (lastLocked == true) armBurst()
             NowBarBridge.service = this
             // Remembered so the watchdog can tell a crash from the owner switching the service off.
             prefs.edit().putBoolean(NowBarWatchdog.WAS_CONNECTED, true).apply()
             // Make sure the root keeper loop is running: it is what restores this service after
             // the process is killed and Android drops it from enabled accessibility services.
-            RootKeeper.startAsync()
+            // With everything off it stays stopped.
+            if (TuningStore.isOn(this, TuningStore.MASTER)) RootKeeper.startAsync()
             NowBarState.onChange = { applyContent() }
             handler.post(timerTick)
             updateSurfaces()
@@ -586,7 +593,8 @@ class NowBarA11yService : AccessibilityService() {
                 val pkg = event.packageName?.toString().orEmpty()
                 if (pkg.isNotEmpty()) onWindowOverKeyguard(pkg, event.className?.toString())
             }
-            val locked = isKeyguardLocked()
+            val raw = isKeyguardLocked()
+            val locked = raw && SystemClock.uptimeMillis() >= trustedUnlockUntil
             if (lastLocked != locked) {
                 Log.i("a11y event caught the lock change (locked=$locked)")
                 lastLocked = locked
@@ -830,7 +838,9 @@ class NowBarA11yService : AccessibilityService() {
      */
     private fun syncRootWatcher() {
         try {
-            val want = TuningStore.isOn(this, TuningStore.ROOT_WATCHER)
+            // The all-off switch owns this too: with the bar off, no `su` child is left behind.
+            val want = TuningStore.isOn(this, TuningStore.MASTER) &&
+                TuningStore.isOn(this, TuningStore.ROOT_WATCHER)
             if (want && !RootKeyguardWatcher.isRunning) {
                 startRootWatcher()
             } else if (!want && RootKeyguardWatcher.isRunning) {
@@ -844,6 +854,7 @@ class NowBarA11yService : AccessibilityService() {
 
     private fun startRootWatcher() {
         try {
+            if (!TuningStore.isOn(this, TuningStore.MASTER)) return
             if (!TuningStore.isOn(this, TuningStore.ROOT_WATCHER)) return
             RootKeyguardWatcher.start(onLine = { line ->
                 handler.post { onRootKeyguardSignal(line) }
@@ -1028,6 +1039,9 @@ class NowBarA11yService : AccessibilityService() {
 
     private fun onLockStateChanged(locked: Boolean) {
         try {
+            // A "locked" read inside the post-unlock trust window is the lagging flag, not a
+            // relock: acting on it put the lockscreen pill back for a blink.
+            if (locked && SystemClock.uptimeMillis() < trustedUnlockUntil) return
             if (lastLocked == locked) return
             lastLocked = locked
             updateSurfaces()
@@ -1049,9 +1063,17 @@ class NowBarA11yService : AccessibilityService() {
                 syncShadeSurfaces()
                 return
             }
-            val locked = isKeyguardLocked()
+            val raw = isKeyguardLocked()
+            // The flag keeps saying "locked" for a moment after the unlock; believing it there is
+            // what put the keyguard pill back on screen for one blink before the next event
+            // removed it again.
+            val locked = raw && SystemClock.uptimeMillis() >= trustedUnlockUntil
             lastLocked = locked
             Log.i("surfaces: keyguardLocked=$locked")
+            // Whichever trigger noticed the unlock, the placeholder is unlocked from here on. The
+            // poll used to reach this point without ever marking it, which left the status pill
+            // drawing an empty shape (title='null') after a boot.
+            if (!locked) markUnlocked()
             // The dot is deliberately NOT driven from here: this value is a bare flag read, and
             // the flag lies for a few hundred ms around screen-off. It follows the two trusted
             // events instead - ACTION_SCREEN_OFF and ACTION_USER_PRESENT.
@@ -1275,6 +1297,14 @@ class NowBarA11yService : AccessibilityService() {
     private fun slideLockPillOut() {
         // Already handed over: a duplicated trigger must not tear the pill down and put it back.
         if (lockPill == null && sbPill != null) return
+        // The keyguard flag, the broadcast, the root log and the accessibility event all report
+        // one unlock. Only the first of them owns the handover.
+        val since = SystemClock.uptimeMillis() - lastUnlockHandoverAt
+        if (since < 600L && sbPill != null) {
+            Log.i("unlock handover suppressed: ${since}ms since the last one")
+            return
+        }
+        lastUnlockHandoverAt = SystemClock.uptimeMillis()
         if (!handoverAllowed()) {
             scheduleResync()
             return
@@ -1309,6 +1339,12 @@ class NowBarA11yService : AccessibilityService() {
 
     /** Lock handover, also with no animation: status pill removed, keyguard pill put in place. */
     private fun transitionToLocked() {
+        // Same reason as the pill add: a lock handover while the unlock is still settling is the
+        // lagging flag, and reversing the handover is the blink.
+        if (SystemClock.uptimeMillis() < trustedUnlockUntil) {
+            Log.i("lock handover ignored: the keyguard is still leaving")
+            return
+        }
         if (!handoverAllowed()) {
             scheduleResync()
             return
@@ -1440,7 +1476,8 @@ class NowBarA11yService : AccessibilityService() {
         // The keyguard pill lands on a deliberate delay after screen-off; do not race that.
         if (handler.hasCallbacks(showLockPillAfterScreenOff)) return
 
-        val locked = lastLocked ?: isKeyguardLocked().also { lastLocked = it }
+        val raw = lastLocked ?: isKeyguardLocked().also { lastLocked = it }
+        val locked = raw && SystemClock.uptimeMillis() >= trustedUnlockUntil
         val items = NowBarState.items(this)
         // Suppressed while a camera / call / other window covers the keyguard: the lock pill is
         // meant to be absent there, so the watchdog must not "repair" it back on top.
@@ -1547,6 +1584,12 @@ class NowBarA11yService : AccessibilityService() {
     private fun addLockPill(slideIn: Boolean = false, fadeIn: Boolean = false) {
         try {
             if (lockPill != null) return
+            // Never put the keyguard pill up right after an unlock: the platform flag still says
+            // "locked" for a moment, and trusting it made the bar come back and go again.
+            if (SystemClock.uptimeMillis() < trustedUnlockUntil) {
+                Log.i("lock pill skipped: the keyguard is still leaving")
+                return
+            }
             // Another window is over the keyguard (camera, call, an overlay): the lockscreen
             // pill stays down until that window is gone.
             if (lockPillSuppressed) {
@@ -1875,7 +1918,7 @@ class NowBarA11yService : AccessibilityService() {
             // The inverse glyphs are part of the measured width, so set them before fitting.
             view.setStatusOnly(lastLocked == true)
             view.setStatusGlyphs(
-                t.inverse,
+                TuningStore.sbDrawsStatusGlyphs(this),
                 batteryPct,
                 cellLevel(),
                 t.signalFirst,
@@ -2007,7 +2050,7 @@ class NowBarA11yService : AccessibilityService() {
             view.setIdleContent(t.idleContent)
             view.setOutlineMode(TuningStore.outline(this))
             view.setStatusGlyphs(
-                t.inverse,
+                TuningStore.sbDrawsStatusGlyphs(this),
                 batteryPct,
                 cellLevel(),
                 t.signalFirst,
@@ -3039,7 +3082,7 @@ class NowBarA11yService : AccessibilityService() {
         try {
             val t = Tuning.sb(this)
             sbPill?.setStatusGlyphs(
-                t.inverse,
+                TuningStore.sbDrawsStatusGlyphs(this),
                 batteryPct,
                 cellLevel(),
                 t.signalFirst,
@@ -3259,25 +3302,32 @@ class NowBarA11yService : AccessibilityService() {
      */
     private fun syncHookFlags() {
         try {
-            val side = TuningStore.sbSide(this)
-            val inverseWant = if (side == TuningStore.SB_SIDE_RIGHT) 1 else 0
-            val clockWant = if (side == TuningStore.SB_SIDE_LEFT_NO_CLOCK) 1 else 0
-            val inverseHave = Settings.Global.getInt(contentResolver, NowBarHook.KEY_INVERSE, -1)
-            val clockHave = Settings.Global.getInt(contentResolver, NowBarHook.KEY_HIDE_CLOCK, -1)
-            if (inverseHave == inverseWant && clockHave == clockWant) return
+            val inverseWant = if (TuningStore.sbInverse(this)) 1 else 0
+            // One choice per element (issue #12): an element the owner left visible is never
+            // hidden, even by the layout that would have hidden it.
+            val clockWant = if (
+                TuningStore.sbClockHidden(this) && TuningStore.hookHideClock(this)
+            ) 1 else 0
+            val clusterWant = if (inverseWant == 1 && TuningStore.hookHideCluster(this)) 1 else 0
+            val privacyWant = if (inverseWant == 1 && TuningStore.hookHidePrivacy(this)) 1 else 0
+            val changes = listOf(
+                NowBarHook.KEY_INVERSE to inverseWant,
+                NowBarHook.KEY_HIDE_CLOCK to clockWant,
+                NowBarHook.KEY_HIDE_SYS_ICONS to clusterWant,
+                NowBarHook.KEY_HIDE_PRIVACY to privacyWant
+            ).mapNotNull { (key, value) ->
+                val have = Settings.Global.getInt(contentResolver, key, -1)
+                if (have == value) null else Triple(key, have, value)
+            }
+            if (changes.isEmpty()) return
             Thread {
-                if (inverseHave != inverseWant) {
-                    val out = RootShell.run("settings put global ${NowBarHook.KEY_INVERSE} $inverseWant")
-                    if (out == null) Log.w("hook flag sync: no root, inverse left at $inverseHave")
-                }
-                if (clockHave != clockWant) {
-                    val out = RootShell.run("settings put global ${NowBarHook.KEY_HIDE_CLOCK} $clockWant")
-                    if (out == null) Log.w("hook flag sync: no root, clock left at $clockHave")
+                for ((key, _, value) in changes) {
+                    val out = RootShell.run("settings put global $key $value")
+                    if (out == null) Log.w("hook flag sync: no root, $key left unwritten")
                 }
             }.start()
             Log.i(
-                "hook: ${NowBarHook.KEY_INVERSE} -> $inverseWant (was $inverseHave), " +
-                    "${NowBarHook.KEY_HIDE_CLOCK} -> $clockWant (was $clockHave)"
+                "hook flags -> " + changes.joinToString { "${it.first}=${it.third} (was ${it.second})" }
             )
         } catch (t: Throwable) {
             Log.w("hook flag sync failed", t)
@@ -3557,6 +3607,43 @@ class NowBarA11yService : AccessibilityService() {
             removeSbPill()
         } catch (t: Throwable) {
             Log.w("removeAllSurfaces failed", t)
+        }
+    }
+
+    /**
+     * "Everything off": stop drawing and stop this service's own timers, without giving up the
+     * accessibility bind - the permission is the app's, and turning the bar back on should not
+     * need a second trip to system settings.
+     */
+    fun shutDownEverything() {
+        try {
+            handler.removeCallbacks(confirmPoll)
+            handler.removeCallbacks(keyguardPoll)
+            handler.removeCallbacks(timerTick)
+            handler.removeCallbacks(watchdog)
+            handler.removeCallbacks(showLockPillAfterScreenOff)
+            disarmAutoClose()
+            removeAllSurfaces()
+            Log.i("everything off: surfaces and timers stopped")
+        } catch (t: Throwable) {
+            Log.w("shutDownEverything failed", t)
+        }
+    }
+
+    /** "Everything on": timers and windows again, on the bind that is still there. */
+    fun startUpAgain() {
+        try {
+            handler.removeCallbacks(timerTick)
+            handler.post(timerTick)
+            handler.removeCallbacks(keyguardPoll)
+            handler.post(keyguardPoll)
+            handler.removeCallbacks(watchdog)
+            handler.postDelayed(watchdog, WATCHDOG_MS)
+            startRootWatcher()
+            updateSurfaces()
+            Log.i("everything on: surfaces and timers running again")
+        } catch (t: Throwable) {
+            Log.w("startUpAgain failed", t)
         }
     }
 

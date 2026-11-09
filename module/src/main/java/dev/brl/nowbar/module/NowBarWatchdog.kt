@@ -49,6 +49,16 @@ object NowBarWatchdog {
         }
     }
 
+    /** Disarms the repeating check, for the all-off switch: nothing should wake us again. */
+    fun cancel(context: Context) {
+        try {
+            context.getSystemService(AlarmManager::class.java)?.cancel(intent(context))
+            Log.i("watchdog: disarmed")
+        } catch (t: Throwable) {
+            Log.w("watchdog cancel failed", t)
+        }
+    }
+
     private fun intent(context: Context): PendingIntent = PendingIntent.getBroadcast(
         context,
         0,

@@ -51,6 +51,15 @@ class NowBarHook : IXposedHookLoadPackage {
         const val KEY_HIDE_CHIPS = "bbbar_hide_live_chips"
 
         /**
+         * Per-element switches for the two things a layout hides (issue #12). Missing means
+         * "follow the layout": the cluster and the privacy dot hide with the right-hand layout,
+         * the clock with the clock-less left one. The settings screen writes them explicitly so
+         * the owner can leave one of them visible.
+         */
+        const val KEY_HIDE_SYS_ICONS = "bbbar_hide_sys_icons"
+        const val KEY_HIDE_PRIVACY = "bbbar_hide_privacy"
+
+        /**
          * 1 while the pill owns the right end of the strip (the inverse layout, issue #10). The
          * hook then hides Android's battery / network icon cluster and puts the notification icons
          * back, since the pill no longer sits on top of them.
@@ -502,7 +511,14 @@ class NowBarHook : IXposedHookLoadPackage {
                         publishScreen(statusBar)
                         // The privacy dot appears and disappears between layouts, so it is swept
                         // here as well: a dot SystemUI re-shows is gone again within half a second.
-                        hidePrivacy(statusBar, flag(statusBar.context, KEY_INVERSE))
+                        hidePrivacy(
+                            statusBar,
+                            flagOr(
+                                statusBar.context,
+                                KEY_HIDE_PRIVACY,
+                                flag(statusBar.context, KEY_INVERSE)
+                            )
+                        )
                     } catch (t: Throwable) {
                         Log.w("hook: clock sample failed", t)
                     }
@@ -859,6 +875,12 @@ class NowBarHook : IXposedHookLoadPackage {
                 resolver.registerContentObserver(
                     Settings.Global.getUriFor(KEY_HIDE_CLOCK), false, observer
                 )
+                resolver.registerContentObserver(
+                    Settings.Global.getUriFor(KEY_HIDE_SYS_ICONS), false, observer
+                )
+                resolver.registerContentObserver(
+                    Settings.Global.getUriFor(KEY_HIDE_PRIVACY), false, observer
+                )
             } catch (t: Throwable) {
                 Log.w("hook: switch observer not registered", t)
             }
@@ -905,8 +927,11 @@ class NowBarHook : IXposedHookLoadPackage {
     ) {
         try {
             val inverse = flag(context, KEY_INVERSE)
-            systemIconsHidden = inverse
-            privacyHidden = inverse
+            // Each element follows the layout unless the owner chose otherwise (issue #12).
+            val hideCluster = flagOr(context, KEY_HIDE_SYS_ICONS, inverse)
+            val hidePrivacyDot = flagOr(context, KEY_HIDE_PRIVACY, inverse)
+            systemIconsHidden = hideCluster
+            privacyHidden = hidePrivacyDot
             // The privacy chip is created lazily and the icon views are rebuilt when the
             // configuration changes, so their classes are picked up on every pass.
             systemArea?.let { area -> hookAreaDraws(area, KIND_ICONS) }
@@ -942,19 +967,19 @@ class NowBarHook : IXposedHookLoadPackage {
                 // one of them (usually the Wi-Fi icon) kept flickering back in for a moment while
                 // the pill's own glyphs sat next to it. A zero on the group covers whatever it
                 // holds, including children that were not there when this pass started.
-                if (inverse) hide(area) else restore(area)
+                if (hideCluster) hide(area) else restore(area)
                 for (i in 0 until area.childCount) {
                     val child = area.getChildAt(i) ?: continue
                     val name = child.javaClass.name
                     if (reported.add(name)) Log.i("hook: system icon area child $name")
-                    if (inverse) hide(child) else restore(child)
+                    if (hideCluster) hide(child) else restore(child)
                 }
             }
 
             // Inverse layout only: the pill owns that corner, so the privacy indicator cannot sit
             // on top of it. Both the AOSP container and any view whose class says Privacy are
             // covered, because the dot is created by its own controller.
-            hidePrivacy(root, inverse)
+            hidePrivacy(root, hidePrivacyDot)
 
             // The clock mask follows the same layout switch, and this pass runs on every layout,
             // so it is also where the flag is read back after a settings change.
@@ -1284,5 +1309,16 @@ class NowBarHook : IXposedHookLoadPackage {
         Settings.Global.getInt(context.contentResolver, key, 0) == 1
     } catch (t: Throwable) {
         false
+    }
+
+    /** A switch that was never written follows the layout it belongs to. */
+    private fun flagOr(context: Context, key: String, fallback: Boolean): Boolean = try {
+        Settings.Global.getInt(
+            context.contentResolver,
+            key,
+            if (fallback) 1 else 0
+        ) == 1
+    } catch (t: Throwable) {
+        fallback
     }
 }

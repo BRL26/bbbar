@@ -129,6 +129,9 @@ class TuningReceiver : BroadcastReceiver() {
         TuningStore.FEATURE_LIVE,
         TuningStore.AOD_GRAY,
         TuningStore.AOD_LINE_STYLE,
+        TuningStore.HOOK_HIDE_CLOCK,
+        TuningStore.HOOK_HIDE_CLUSTER,
+        TuningStore.HOOK_HIDE_PRIVACY,
         TuningStore.OUTLINE
     )
 

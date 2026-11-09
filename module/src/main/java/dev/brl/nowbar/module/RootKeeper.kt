@@ -64,6 +64,22 @@ object RootKeeper {
         }
     }
 
+    /**
+     * Stops the loop through its pid file. Used by the all-off switch, which is meant to leave
+     * nothing of bbbar running: the keeper otherwise sleeps forever in the background.
+     */
+    fun stop() {
+        try {
+            RootShell.run(
+                "if [ -f $PID_FILE ]; then kill ${'$'}(cat $PID_FILE) 2>/dev/null; " +
+                    "rm -f $PID_FILE; fi; rm -f /data/local/tmp/bbbar-watchdog.alive"
+            )
+            Log.i("root keeper: stopped")
+        } catch (t: Throwable) {
+            Log.w("root keeper stop failed", t)
+        }
+    }
+
     /** Writes the script and starts it if it is not already running. Safe to call repeatedly. */
     fun start() {
         try {

@@ -1,10 +1,13 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.1.0** — [release notes](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
+**v2.2.0** — previous release notes: [v2.1.0](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
 
-New in this build: **strip placement** (right end, left end, or the clock-less left side) and the
-pill's own **idle clock**. The shipped defaults are the ones dialled in on the phone: left side with
-the bar's clock off, 160 × 27 dp, 20 dp from the left, and the idle line reads `5:11 PM :)`.
+New in this build: **per-element hook switches** (the bar's clock, the battery / network cluster,
+the privacy dot), a real **all-off** switch that also stops the root keeper, the keyguard log
+stream and the watchdog, **grayscale AOD app icons** whose progress dots invert against a
+black-and-white copy, and an unlock handover that cannot blink. Shipped defaults are still the ones
+dialled in on the phone: left side with the bar's clock off, 160 × 27 dp, 20 dp from the left, and
+the idle line reads `5:11 PM :)`.
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that
@@ -111,20 +114,30 @@ the `PhoneStatusBarView` constructor, walks to the view whose resource id is `no
 and sets `alpha` on the children the switches ask for. It never lays anything out and never draws,
 so a changed class name leaves the stock status bar untouched instead of breaking it.
 
-Two switches, in **Settings → Android status bar**:
+Two switches in **Settings → Android status bar**, and three per-element ones on the status bar
+page (issue #12):
 
 | Switch | Settings.Global key | Hides |
 | --- | --- | --- |
 | Hide notification icons | `bbbar_hide_notif_icons` | the app icons next to the clock |
 | Hide Android live updates | `bbbar_hide_live_chips` | the system's own Live Update chips |
-| (placement) | `bbbar_inverse` | Android's battery / network cluster and the privacy dot, for the right-end layout |
-| (placement) | `bbbar_hide_clock` | the strip's clock, for the clock-less left layout (portrait only) |
+| Hide Android's clock | `bbbar_hide_clock` | the strip's clock, for the clock-less left layout (portrait only) |
+| Hide battery / network icons | `bbbar_hide_sys_icons` | Android's battery / network cluster, for the right-end layout |
+| Hide the privacy indicator | `bbbar_hide_privacy` | the camera / microphone dot, for the right-end layout |
+| (placement) | `bbbar_inverse` | tells the hook which end the pill owns, so the notification icons come back |
 
-The two placement flags are not switches in the app: they follow **Placement** on the status bar
-page. `bbbar_hide_clock` masks the same clock view the hook samples for `bbbar_clock_right_px`, so a
+The three per-element switches live under **Look → Status bar pill → What the hook hides** and are
+on by default. Each is only consulted where its layout uses it: the clock for the clock-less left
+side, the cluster and the privacy dot for the right-hand one. Switching one off leaves Android's own
+element in place - the pill then stops drawing its own battery / network glyphs, since it no longer
+replaced them. A key that was never written follows the layout, so an older installation behaves
+exactly as before until a switch is touched.
+
+`bbbar_hide_clock` masks the same clock view the hook samples for `bbbar_clock_right_px`, so a
 hidden clock reports a right edge of `0` and the left-edge layout simply has nothing to avoid.
 
-Both are read by SystemUI from `Settings.Global` (writable only through root, which the app uses) and
+All of them are read by SystemUI from `Settings.Global` (writable only through root, which the app
+uses) and
 watched with a `ContentObserver`, so flipping a switch takes effect without a restart. The hook
 takes effect when SystemUI (re)loads, so the first time needs **Test tooling → Restart SystemUI**, and
 the module must be enabled for `com.android.systemui` in LSPosed. The **Xposed hook** row asks the hook itself: it publishes
@@ -195,7 +208,7 @@ and what the hook does to Android's strip:
 
 | Placement | Where | Hook |
 | --- | --- | --- |
-| **Right** | Android's battery / network corner, `sbRightDp` from the right | hides `system_icon_area` and the privacy dot, restores the notification icons |
+| **Right** | Android's battery / network corner, `sbRightDp` from the right | hides `system_icon_area` and the privacy dot (each unless its own switch is off), restores the notification icons |
 | **Left** | over the notification icons, at `sbLeftDp` (or just past the clock) | leaves the right cluster and the clock alone, hides the notification icons |
 | **Left, no clock** (default) | the left end, `sbRightDp` **read as a left margin** | hides the clock (portrait), so the pill has that whole side |
 
@@ -470,6 +483,12 @@ the line reads as part of the pattern rather than sitting on top of it.
 The black dots in the text are the *same* dots as the bar's progress, not a texture laid over the
 letters: they only exist as far as the played fraction reaches, clipped to the glyphs and to the
 filled width at once. Beyond the playhead the line is solid text. At 0 % there are no holes at all.
+
+The leading glyph - an app icon, artwork, the KDE Connect play mark - is the same idea in one
+place: it is drawn in grayscale on the AOD, and only the pixels under a progress dot are one-bit.
+Each of those flips the opposite way to the colour the mark rounds to on a black-and-white copy of
+itself, so a light pixel gets a dark dot and a dark pixel a light one (issue #11). A colourful app
+icon therefore still looks like itself, with the played part reading as a dotted copy of it.
 
 Spacing and dot size are separate settings — **AOD dot spacing** (3–24 dp) and **AOD dot size**
 (1–16 dp) — so the dots can be made bigger without also spreading them out. The dot diameter is

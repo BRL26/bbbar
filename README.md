@@ -140,7 +140,10 @@ All of them are read by SystemUI from `Settings.Global` (writable only through r
 uses) and
 watched with a `ContentObserver`, so flipping a switch takes effect without a restart. The hook
 takes effect when SystemUI (re)loads, so the first time needs **Sys → SystemUI → Restart SystemUI**,
-and the module must be enabled for `com.android.systemui` in LSPosed. The **Xposed hook** row asks the hook itself: it publishes
+and the module must be enabled for `com.android.systemui` in LSPosed. A module that is installed but
+not *enabled* (or not scoped to SystemUI) loads nothing at all: the row then keeps reading
+`not loaded (last beat Ns ago)` however often SystemUI restarts, and LSPosed posts its own
+"module is not active" notification. Toggling the module off and on in the manager fixes it. The **Xposed hook** row asks the hook itself: it publishes
 `Settings.Global → bbbar_hook_beat` (SystemUI holds `WRITE_SECURE_SETTINGS` here) every 30 s, and the
 row shows `loaded` when that heartbeat is fresh, `not loaded (last beat Ns ago)` when SystemUI
 restarted without the hook, and `off (kill switch)` when the file exists. A logcat attach line is

@@ -30,8 +30,10 @@ Enable / disable:
 - [x] **All-off never touches accessibility.** The switch stops the pill, the root keeper, the
       keyguard log stream and the watchdog; `enabled_accessibility_services` is not written, and
       neither is the notification-access grant. Turning it back on needs nothing else.
-- [x] **Restart SystemUI is on the Sys tab**, next to the hook it reloads. Built clean
-      (`assembleDebug`); not re-checked on the phone because adb had no device attached.
+- [x] **Restart SystemUI is on the Sys tab**, next to the hook it reloads. Verified on the phone:
+      the button kills SystemUI (with the app's own root grant), and the hook row goes from
+      `not loaded (last beat Ns ago)` to `loaded` once LSPosed has the module enabled and scoped to
+      `com.android.systemui`.
 
 ### 2.2.0 — hook choices, AOD colour, all-off, handover
 - [x] **Issue #12: what the hook hides is a choice per element.** **Sys → Android status bar** has

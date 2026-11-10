@@ -644,10 +644,19 @@ class NowBarA11yService : AccessibilityService() {
                 coveringWindow = if (cls.isNullOrBlank()) pkg else "$pkg/$cls"
                 Log.i("lockscreen pill steps aside: $coveringWindow is over the keyguard")
                 removeLockPill()
+                // The strip pill is an overlay too: on the lock screen it carries the status
+                // icons, so it has to go with the card or it sits on top of the camera / call.
+                if (sbPill != null) {
+                    removeSbPill()
+                    Log.i("lockscreen strip pill steps aside too")
+                }
             } else if (lockPillSuppressed) {
                 clearLockPillSuppression()
                 Log.i("lockscreen pill back: the keyguard is in front again ($pkg)")
-                if (lastLocked == true) addLockPill(fadeIn = true)
+                if (lastLocked == true) {
+                    addLockPill(fadeIn = true)
+                    if (sbWantedOnLockScreen() && !sbHidden) addSbPill(fadeIn = true)
+                }
             }
         } catch (t: Throwable) {
             Log.w("keyguard window check failed", t)
@@ -1492,7 +1501,11 @@ class NowBarA11yService : AccessibilityService() {
         // Only the master switch can take it away: there is no per-surface switch, because the
         // pill is what replaces Android's battery and signal icons. A stored `surfaceStatus=false`
         // from an older build is ignored here on purpose.
-        val wantSb = !locked && TuningStore.isOn(this, TuningStore.MASTER)
+        // On the lock screen the strip pill is the phone's own status icons, so it is wanted
+        // there too - except in the clock-less left layout, and never while a camera or a call
+        // covers the keyguard.
+        val wantSb = TuningStore.isOn(this, TuningStore.MASTER) &&
+            if (locked) sbWantedOnLockScreen() && !lockPillSuppressed else true
         val haveLock = lockPill?.isAttachedToWindow == true
         val haveSb = sbPill?.isAttachedToWindow == true
 
@@ -1868,6 +1881,12 @@ class NowBarA11yService : AccessibilityService() {
                 return
             }
             if (sbPill != null) return
+            // A camera / call over the keyguard owns the screen: the strip pill is an overlay as
+            // well, and must not be put on top of it (issue #9).
+            if (lastLocked == true && lockPillSuppressed) {
+                Log.i("sb pill skipped: $coveringWindow is over the keyguard")
+                return
+            }
             // Read fresh, not cached: during an unlock the cached value can still describe the
             // AOD, where the bar is hidden, and that would swallow the handover.
             sbHidden = readStatusBarHidden()

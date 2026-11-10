@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.2.1** — previous release notes: [v2.1.0](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
+**v2.2.2** — previous release notes: [v2.2.1](https://github.com/BRL26/bbbar/releases/tag/v2.2.1)
 
 New in this build: a **Sys tab** for everything that leaves the app - the **all-off** switch, the
 LSPosed hook (its state row and the **per-element hook switches** for the bar's clock, the battery /
@@ -269,6 +269,12 @@ with the line, and the window width animates down to the cluster. Unlocking reve
 pill on the lock screen is a readout, not a control: the window is `FLAG_NOT_TOUCHABLE` and the view
 ignores touches while the keyguard is up. Opening the shade while locked removes it altogether — the
 shade has its own header, and there is nothing the pill could open.
+
+The same goes for anything else that comes over the keyguard. When the lock-screen camera, an
+incoming call or another app takes the screen, both lock-screen surfaces step aside — the card and
+the strip pill — and the accessibility window list is what says which window is in front. The
+watchdog does not put either of them back while that window is there; both return when the keyguard
+is in front again.
 
 ## Unlock/lock detection
 

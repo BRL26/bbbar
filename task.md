@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.2.1** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
+**v2.2.2** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -21,6 +21,16 @@ Enable / disable:
   ```
 
 ## Done
+
+### 2.2.2 — issue #9: the strip pill steps aside too
+- [ ] **Both lock-screen surfaces give way to a camera / call.** The suppression removed the bottom
+      card only, written when that was the only surface on the keyguard. The strip pill is on the
+      lock screen now, so the camera or an incoming call had the battery / Wi-Fi pill sitting on
+      top of it - the same overlay complaint as #9, which is why it read as "reappeared". A
+      covering window now removes both surfaces, `addSbPill` refuses to place the strip while one
+      is there, and the watchdog counts the strip as wanted on the keyguard (it used to see a
+      locked phone with a strip pill and "repair" it by removing one). Not yet checked on the
+      phone: no adb was attached, so this is compile-verified only.
 
 ### 2.2.1 — a Sys tab, and the hook switches moved to it
 - [x] **One tab for everything outside the bar.** The `Sys` tab holds the **Everything off** switch,

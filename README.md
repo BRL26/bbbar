@@ -1,13 +1,13 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.2.0** — previous release notes: [v2.1.0](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
+**v2.2.1** — previous release notes: [v2.1.0](https://github.com/BRL26/bbbar/releases/tag/v2.1.0)
 
-New in this build: **per-element hook switches** (the bar's clock, the battery / network cluster,
-the privacy dot), a real **all-off** switch that also stops the root keeper, the keyguard log
-stream and the watchdog, **grayscale AOD app icons** whose progress dots invert against a
-black-and-white copy, and an unlock handover that cannot blink. Shipped defaults are still the ones
-dialled in on the phone: left side with the bar's clock off, 160 × 27 dp, 20 dp from the left, and
-the idle line reads `5:11 PM :)`.
+New in this build: a **Sys tab** for everything that leaves the app - the **all-off** switch, the
+LSPosed hook (its state row and the **per-element hook switches** for the bar's clock, the battery /
+network cluster and the privacy dot) and **Restart SystemUI**. Also **grayscale AOD app icons**
+whose progress dots invert against a black-and-white copy, and an unlock handover that cannot blink.
+Shipped defaults are still the ones dialled in on the phone: left side with the bar's clock off,
+160 × 27 dp, 20 dp from the left, and the idle line reads `5:11 PM :)`.
 
 A Now Bar–style pill for Nothing Phone (3a) on Nothing OS 5 (Android 17): a rounded pill on the
 lock screen, a small one where the status bar notification icons live, and an expanded pop-up that

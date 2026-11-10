@@ -48,7 +48,7 @@ import com.google.android.material.textfield.TextInputLayout
 /**
  * The settings screen.
  *
- * Five tabs — Home, Look, Activities, Debug, About — and the Look tab drills into one sub-page per
+ * Six tabs — Home, Look, Items, Sys, Debug, About — and the Look tab drills into one sub-page per
  * surface, so the numbers for the lockscreen pill are not mixed in with the ones for the expanded
  * card. Every control writes straight into the shared preferences the overlay watches, so an edit
  * lands on the pill immediately; "Apply settings" is there for the cases where a value needs the

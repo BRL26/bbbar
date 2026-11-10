@@ -175,7 +175,7 @@ Enable / disable:
 - [x] Both switches write `Settings.Global` (`bbbar_hide_notif_icons`, `bbbar_hide_live_chips`)
       through root; the hook watches them with a `ContentObserver`, so no restart to toggle
 - [x] Settings shows whether the hook is really loaded (reads the SystemUI log through root), plus
-      **Restart SystemUI** in Test tooling for the first load after an install
+      **Restart SystemUI** (now **Sys → SystemUI**) for the first load after an install
 
 ### 1.0.0 additions (verified on the device)
 - [x] Media card shows the **player's own app icon** next to the line (cached per package), and the

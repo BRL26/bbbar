@@ -68,6 +68,9 @@ class NowBarA11yService : AccessibilityService() {
          */
         const val AUTO_CLOSE_MS = 10_000L
 
+        /** How long a paused player keeps the line before it tucks into the idle pill (#13). */
+        const val PAUSED_TUCK_MS = 10_000L
+
         /** AOD fades the pill to greyscale with the rest of the display; waking snaps it back. */
         const val AOD_FADE_MS = 650L
         const val WAKE_FADE_MS = 160L
@@ -369,6 +372,60 @@ class NowBarA11yService : AccessibilityService() {
             } catch (t: Throwable) {
                 Log.w("auto close failed", t)
             }
+        }
+    }
+
+    /** The paused front card, when it paused, and whether the tuck has been logged. */
+    private var pausedKey = ""
+    private var pausedSince = 0L
+    private var tuckLogged = false
+
+    /** Re-applies content when the pause has lasted long enough to tuck the player away. */
+    private val tuckAfterPause = Runnable {
+        try {
+            applyContent()
+        } catch (t: Throwable) {
+            Log.w("pause tuck apply failed", t)
+        }
+    }
+
+    /**
+     * True once the front card is a player paused for [PAUSED_TUCK_MS] (issue #13): the line goes
+     * back to the idle text with the player's own mark after it, so a song that has stopped does
+     * not hold the status bar with a title that will never change again. A resume, another front
+     * card or a different player resets it; tapping still expands the card for the controls.
+     */
+    private fun pausedTuck(items: List<NowBarItem>): Boolean {
+        try {
+            val front = items.firstOrNull()
+            if (front == null || front.kind != ItemKind.MEDIA || front.playing) {
+                if (pausedKey.isNotEmpty()) Log.i("media resumed: the line comes back")
+                pausedKey = ""
+                pausedSince = 0L
+                tuckLogged = false
+                handler.removeCallbacks(tuckAfterPause)
+                return false
+            }
+            val now = SystemClock.uptimeMillis()
+            if (pausedKey != front.id) {
+                pausedKey = front.id
+                pausedSince = now
+                tuckLogged = false
+                handler.removeCallbacks(tuckAfterPause)
+                handler.postDelayed(tuckAfterPause, PAUSED_TUCK_MS)
+                Log.i("media paused: the line stays for ${PAUSED_TUCK_MS}ms")
+                return false
+            }
+            if (pausedSince == 0L) pausedSince = now
+            val tucked = now - pausedSince >= PAUSED_TUCK_MS
+            if (tucked && !tuckLogged) {
+                tuckLogged = true
+                Log.i("media paused for ${now - pausedSince}ms: tucked into the idle line")
+            }
+            return tucked
+        } catch (t: Throwable) {
+            Log.w("pause tuck check failed", t)
+            return false
         }
     }
 
@@ -789,6 +846,7 @@ class NowBarA11yService : AccessibilityService() {
             handler.removeCallbacks(confirmPoll)
             handler.removeCallbacks(keyguardPoll)
             handler.removeCallbacks(watchdog)
+            handler.removeCallbacks(tuckAfterPause)
             unregisterStatusBarObserver()
             unregisterBattery()
             unregisterNetwork()
@@ -1900,6 +1958,9 @@ class NowBarA11yService : AccessibilityService() {
                 // The mini pill has no controls of its own: a tap is what opens the expansion.
                 onTap = { expandFromSbPill() }
                 onSwipe = { _, _ -> }
+                // The pill covers the notification area, so a downward swipe on it opens the
+                // shade: that is the only way to pull notifications down (issue #14).
+                swipeDown = { openNotificationShade() }
                 onControl = { }
                 // It ignores swipes, so it must not follow the finger either: a drag on something
                 // that cannot change cards was just the card sliding under its own clipped edge.
@@ -2283,6 +2344,27 @@ class NowBarA11yService : AccessibilityService() {
             }
         } catch (t: Throwable) {
             Log.w("markUnlocked failed", t)
+        }
+    }
+
+    /**
+     * Opens the notification shade from the status pill (issue #14). SystemUI owns the shade, so
+     * root is the only door an ordinary app has - the same `su` the rest of the app already uses.
+     * The hook then reports the shade as open, which puts the pill into its non-interactive state.
+     */
+    private fun openNotificationShade() {
+        try {
+            if (shadeOpen()) return
+            Log.i("opening the notification shade")
+            Thread({
+                try {
+                    RootShell.run("cmd statusbar expand-notifications")
+                } catch (t: Throwable) {
+                    Log.w("shade expand failed", t)
+                }
+            }, "nowbar-expand-shade").start()
+        } catch (t: Throwable) {
+            Log.w("shade expand thread failed", t)
         }
     }
 
@@ -3372,6 +3454,9 @@ class NowBarA11yService : AccessibilityService() {
         applyingContent = true
         try {
             val items = NowBarState.items(this)
+            // A paused player tucks into the idle line after a while (issue #13). Only the status
+            // bar pill does it: the lock card and the popup are still the player's controls.
+            val tucked = pausedTuck(items) && popupPill == null
             if (items.isEmpty()) {
                 // Nothing active: the lock pill and the popup have nothing to draw and go away.
                 // The status bar pill keeps the placeholder label, and only disappears when that
@@ -3392,6 +3477,7 @@ class NowBarA11yService : AccessibilityService() {
                     !(lastLocked == true && !sbWantedOnLockScreen())
                 if (!keepSb) removeSbPill() else sbPill?.let { view ->
                     view.setStatusOnly(lastLocked == true)
+                    view.setTuckedMedia(false)
                     view.setItems(emptyList(), false, 0)
                     // Back to the idle line: the pill has to shrink with it, otherwise it keeps
                     // the width of the card that just went away.
@@ -3434,6 +3520,8 @@ class NowBarA11yService : AccessibilityService() {
             // selected card, so swiping anywhere on the pill changes what the status bar shows.
             sbPill?.let { view ->
                 updateStatusGlyphs()
+                // A paused player gives the line back to the idle text, with its mark at the end.
+                view.setTuckedMedia(tucked)
                 view.setItems(ordered().take(1), false, 0)
                 // Shrink to the line instead of leaving empty card to the right of the text.
                 fitSbWidth(view)

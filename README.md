@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.2.2** — previous release notes: [v2.2.1](https://github.com/BRL26/bbbar/releases/tag/v2.2.1)
+**v2.3.0** — previous release notes: [v2.2.2](https://github.com/BRL26/bbbar/releases/tag/v2.2.2)
 
 New in this build: a **Sys tab** for everything that leaves the app - the **all-off** switch, the
 LSPosed hook (its state row and the **per-element hook switches** for the bar's clock, the battery /
@@ -255,6 +255,21 @@ The stored configuration is versioned (`configVersion`). A file written by an ol
 in for the old layout cannot leave the new one half-configured. The status pill's numbers are also
 clamped to what the strip can hold (40–1000 × 12–96 dp), so a stale slider extreme cannot make it
 cover the screen.
+
+## A paused player, and pulling the shade down
+
+A player that has been paused for ten seconds stops holding the line. The strip pill goes back to
+the idle line — the clock, or the clock and the placeholder, per the idle setting — and keeps only
+the player's own mark at the end of it, so it reads as `5:47 PM :) ⏵`. With the idle line set to
+nothing at all, the pill is just the mark in its circle. Resuming, or another card taking the
+front, brings the title back; tapping the pill still expands the media card, so the controls stay
+one tap away. Only the strip pill tucks: the lock screen's card and the expanded popup are still the
+player, because that is where its controls live.
+
+The pill sits on top of the notification area, so a downward swipe on it opens the shade. The
+service has no shade of its own and an app cannot open SystemUI's, so that swipe runs
+`su -c cmd statusbar expand-notifications` — the same root the rest of the app uses. The hook then
+reports the shade as open, and the pill goes non-interactive until it closes.
 
 ## The lock screen's strip pill
 

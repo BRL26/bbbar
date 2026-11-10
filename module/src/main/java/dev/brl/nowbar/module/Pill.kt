@@ -323,6 +323,12 @@ class PillView(context: Context) : View(context) {
      * it. A live card always wins over all three.
      */
     private var idleContent = TuningStore.DEFAULT_IDLE_CONTENT
+
+    /**
+     * A player paused long enough gives the line back to the idle text and keeps only its own mark
+     * at the end (issue #13). Tapping still expands the card, so the controls stay one tap away.
+     */
+    private var tuckedMedia = false
     private var items: List<NowBarItem> = emptyList()
     private var textDp = TuningStore.DEFAULT_TEXT_DP
     private var radiusOverrideDp = 0f
@@ -498,6 +504,12 @@ class PillView(context: Context) : View(context) {
     /** `dx`/`dy` are -1, 0 or 1; the service decides what the gesture means per surface. */
     var onSwipe: ((Int, Int) -> Unit)? = null
 
+    /**
+     * A surface that ignores drags but still reads a downward swipe. The status bar pill sits on
+     * top of the notification area, so this is how the shade opens (issue #14).
+     */
+    var swipeDown: (() -> Unit)? = null
+
     /** "prev" | "playpause" | "next" from the expanded media controls. */
     var onControl: ((String) -> Unit)? = null
 
@@ -534,8 +546,11 @@ class PillView(context: Context) : View(context) {
             }
             val glyphSize = (h - pad * 2f).coerceAtMost(dp(34f)).coerceAtLeast(dp(14f))
             val item = frontItem
+            // A tucked player draws the idle line, not its title, with its own mark at the end.
+            val tucked = tuckedMedia && item != null
             val text = when {
                 item == null -> idleLine()
+                tucked -> idleLine()
                 item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
                 else -> item.title.takeIf { it.isNotBlank() } ?: label
             }
@@ -543,7 +558,7 @@ class PillView(context: Context) : View(context) {
             // Only the cards that actually draw a leading glyph give up room to it: media
             // draws the player's icon, the rest draw their own mark or notification icon.
             val iconW = when {
-                item == null -> 0f
+                item == null || tucked -> 0f
                 item.kind == ItemKind.MEDIA ->
                     if (isKdeConnect(item.packageName.orEmpty()) ||
                         appIcon(item.packageName.orEmpty()) != null
@@ -562,7 +577,9 @@ class PillView(context: Context) : View(context) {
             } else {
                 0f
             }
-            val wanted = pad + iconW + textW + clusterW + pad + dp(1f)
+            // The tucked player's mark sits at the far end, after the idle text.
+            val markW = if (tucked) glyphSize + dp(9f) else 0f
+            val wanted = pad + iconW + textW + markW + clusterW + pad + dp(1f)
             // A line that does not fit keeps the tuned width: it scrolls inside it. Shrinking
             // there would leave a tiny pill scrolling a long line, which is the one thing this
             // is not for. A line that does fit shrinks the pill down to it, as far as a circle -
@@ -1021,6 +1038,17 @@ class PillView(context: Context) : View(context) {
         }
     }
 
+    /** See [tuckedMedia]. */
+    fun setTuckedMedia(on: Boolean) {
+        try {
+            if (on == tuckedMedia) return
+            tuckedMedia = on
+            invalidate()
+        } catch (t: Throwable) {
+            Log.w("PillView.setTuckedMedia threw", t)
+        }
+    }
+
     private fun idleShowsClock(): Boolean =
         idleContent == TuningStore.IDLE_CONTENT_CLOCK ||
             idleContent == TuningStore.IDLE_CONTENT_CLOCK_THEN_LABEL
@@ -1030,7 +1058,8 @@ class PillView(context: Context) : View(context) {
      * trim. A clock cut short is wrong information, not a smaller pill, so the service lets the
      * pill measure this line against the strip instead (it still shrinks to the time).
      */
-    fun idleLineWantsRoom(): Boolean = frontItem == null && allowIdle && idleShowsClock()
+    fun idleLineWantsRoom(): Boolean =
+        (frontItem == null || tuckedMedia) && allowIdle && idleShowsClock()
 
     /** Cached with the view: a locale or 24-hour change comes with a new window anyway. */
     private val clockFormat: java.text.DateFormat by lazy {
@@ -1374,7 +1403,7 @@ class PillView(context: Context) : View(context) {
         val glyphRect = RectF(pad, glyphTop, pad + glyphSize, glyphTop + glyphSize)
         // The lock screen's icon-only pill has no room for a leading glyph - the shape narrows
         // around the status icons - so it goes with the line.
-        val hideLeading = statusGlyphs && statusOnlyMix > 0.5f
+        val hideLeading = (statusGlyphs && statusOnlyMix > 0.5f) || (tuckedMedia && item != null)
         // The AOD draws the leading glyph as one-bit art: every pixel is rounded to black or
         // white, and the dot lattice flips the pixels it covers. The mark inverts in dots instead
         // of turning into a solid block, and it works the same for a bitmap, the play button and
@@ -1403,7 +1432,15 @@ class PillView(context: Context) : View(context) {
         // Controls live in the expanded card only. Media gets the transport set Android's own
         // player shows; every other card gets the source notification's own buttons (the Clock
         // app's Pause / Add 1 min, a live update's action), so no card is expanded and inert.
+        // A tucked player's mark takes its room from the end of the line first: the idle text
+        // reads first, then the app it belongs to (issue #13).
+        val markSize = if (tuckedMedia && item != null) glyphSize * 0.9f else 0f
+        var markLeft = -1f
         var textRight = w - pad
+        if (markSize > 0f) {
+            markLeft = (textRight - markSize).coerceAtLeast(textLeft)
+            textRight = markLeft - dp(9f)
+        }
         controlRects.clear()
         controlKeys.clear()
         val front = item
@@ -1447,6 +1484,7 @@ class PillView(context: Context) : View(context) {
         // The line, before the rule is placed: the gap beside it depends on where its ink ends.
         val title = when {
             item == null -> if (allowIdle) idleLine() else ""
+            tuckedMedia && allowIdle -> idleLine()
             item.kind == ItemKind.TIMER && item.subtitle.isNotBlank() -> item.subtitle
             else -> item.title.takeIf { it.isNotBlank() } ?: label
         }
@@ -1464,6 +1502,11 @@ class PillView(context: Context) : View(context) {
             val lineLeft = w - pad - clusterW
             val centeredLeft = (w - clusterW) / 2f
             val left = lineLeft + (centeredLeft - lineLeft) * statusOnlyMix
+            // The paused player's mark is part of the line, so it stops with it.
+            if (markLeft >= 0f) {
+                markLeft = minOf(markLeft, left - markSize - dp(STATUS_DIVIDER_GAP_DP) * 2f)
+                    .coerceAtLeast(textLeft)
+            }
             val top = (h - iconH) / 2f
             // The line fades out as the glyphs take the middle, so a lock morphs rather than swaps.
             val textFade = (1f - statusOnlyMix).coerceIn(0f, 1f)
@@ -1603,6 +1646,18 @@ class PillView(context: Context) : View(context) {
         }
         titlePaint.alpha = titleAlpha
         subtitlePaint.alpha = subtitleAlpha
+
+        // The tucked player's own mark, at the end of the idle line.
+        if (markLeft >= 0f && markSize > 0f && item != null) {
+            val markTop = ((contentBottom - markSize) / 2f).coerceAtLeast(0f)
+            val mark = RectF(markLeft, markTop, markLeft + markSize, markTop + markSize)
+            val pkg = item.packageName.orEmpty()
+            if (isKdeConnect(pkg)) {
+                drawPlayButton(canvas, mark)
+            } else {
+                appIcon(pkg)?.let { drawAppIcon(canvas, it, mark, markSize * 0.28f) }
+            }
+        }
 
         // The line style draws the progress as the bar's own checkerboard instead.
         if (showBar && !seekVisible && !lineStyle && item != null) {
@@ -2400,6 +2455,17 @@ class PillView(context: Context) : View(context) {
                             }
                         }
                         return true
+                    }
+                    // A surface that ignores drags still reads a downward swipe: the status bar
+                    // pill sits on the notification area, so this is how the shade opens (#14).
+                    if (swipeDown != null) {
+                        val dyUp = event.rawY - downRawY
+                        val dxUp = event.rawX - downRawX
+                        if (dyUp >= dp(18f) && dyUp > abs(dxUp) * 1.5f) {
+                            Log.i("swipe down on the pill: opening the shade")
+                            swipeDown?.invoke()
+                            return true
+                        }
                     }
                     if (idle) return true
                     // The rects are in card coordinates, so a card that is still springing back

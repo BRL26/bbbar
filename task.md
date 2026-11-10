@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.2.2** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
+**v2.3.0** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -21,6 +21,20 @@ Enable / disable:
   ```
 
 ## Done
+
+### 2.3.0 — issues #13 and #14: a paused player tucks away, and the shade opens
+- [x] **A paused player gives the line back after 10 s (#13).** The strip pill returns to the idle
+      line and keeps the player's own mark at the end (`5:47 PM :)` then the mark); with the idle
+      line set to nothing it is just the mark in its circle. Only the strip pill does this - the
+      lock card and the popup are still the player's controls. A resume, a new front card or
+      another player clears it, and tapping still expands the card. Verified on the phone:
+      `media paused for 10003ms: tucked into the idle line`, then `media resumed: the line comes
+      back`.
+- [x] **Swiping the pill down opens the shade (#14).** The pill has no drag of its own, so a
+      downward swing over it is read on release and runs `su -c cmd statusbar
+      expand-notifications`; the hook's shade flag then puts the pill into its non-interactive
+      state. Confirmed working by the owner; the synthetic adb swipe in the test run missed the
+      window, so the log line was never produced here.
 
 ### 2.2.2 — issue #9: the strip pill steps aside too
 - [ ] **Both lock-screen surfaces give way to a camera / call.** The suppression removed the bottom

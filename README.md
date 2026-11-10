@@ -1,6 +1,6 @@
 # bbbar — a Now Bar for Nothing OS
 
-**v2.3.0** — previous release notes: [v2.2.2](https://github.com/BRL26/bbbar/releases/tag/v2.2.2)
+**v2.3.0** — previous release notes: [v2.2.1](https://github.com/BRL26/bbbar/releases/tag/v2.2.1)
 
 New in this build: a **Sys tab** for everything that leaves the app - the **all-off** switch, the
 LSPosed hook (its state row and the **per-element hook switches** for the bar's clock, the battery /
@@ -363,6 +363,7 @@ Swiping is part of the surface:
 | Tap outside | expanded pill / popup | collapse (animated) |
 | Swipe right | expanded or lockscreen card, media in front | previous track |
 | Swipe left | expanded or lockscreen card, media in front | next track |
+| Swipe down | status pill | pulls the notification shade down |
 | Swipe up / down | expanded or lockscreen card | cycle the stack; the new front card is also what the status bar pill shows |
 | Drag the scrubber | expanded media card | preview a position, seek on release |
 

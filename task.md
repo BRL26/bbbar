@@ -4,7 +4,7 @@ Living work list. `done` means verified on the device (Nothing Phone 3a, Nothing
 
 ## Current state
 
-**v2.2.0** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
+**v2.2.1** (`github.com/BRL26/bbbar`). Base is settled: the accessibility
 overlay draws the lockscreen pill, hands over to the status bar pill on unlock, and both expand on
 tap. The pill shows real items — media, timer/stopwatch, live progress — as a stack of up to several
 cards, with controls only in the expanded views and swipes to change track or card. Master and
@@ -20,11 +20,22 @@ Enable / disable:
   adb shell settings put secure accessibility_enabled 1
   ```
 
-## Done (verified on the device)
+## Done
+
+### 2.2.1 — a Sys tab, and the hook switches moved to it
+- [x] **One tab for everything outside the bar.** The `Sys` tab holds the **Everything off** switch,
+      the LSPosed hook (its status row and the three hiders) and **Restart SystemUI**. Home keeps the
+      live status readout without a switch, and the hook/hider switches and the restart are gone
+      from the Items and Debug tabs.
+- [x] **All-off never touches accessibility.** The switch stops the pill, the root keeper, the
+      keyguard log stream and the watchdog; `enabled_accessibility_services` is not written, and
+      neither is the notification-access grant. Turning it back on needs nothing else.
+- [x] **Restart SystemUI is on the Sys tab**, next to the hook it reloads. Built clean
+      (`assembleDebug`); not re-checked on the phone because adb had no device attached.
 
 ### 2.2.0 — hook choices, AOD colour, all-off, handover
-- [x] **Issue #12: what the hook hides is a choice per element.** **Look → Status bar pill → What
-      the hook hides** has Android's clock, the battery / network cluster and the privacy indicator.
+- [x] **Issue #12: what the hook hides is a choice per element.** **Sys → Android status bar** has
+      Android's clock, the battery / network cluster and the privacy indicator.
       The hook reads `bbbar_hide_clock`, `bbbar_hide_sys_icons` and `bbbar_hide_privacy`; a missing
       key follows the placement, so old installs behave exactly as before. Showing the cluster also
       stops the pill drawing its own battery / network glyphs (`sbDrawsStatusGlyphs`), because there

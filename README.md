@@ -126,8 +126,8 @@ page (issue #12):
 | Hide the privacy indicator | `bbbar_hide_privacy` | the camera / microphone dot, for the right-end layout |
 | (placement) | `bbbar_inverse` | tells the hook which end the pill owns, so the notification icons come back |
 
-The three per-element switches live under **Look → Status bar pill → What the hook hides** and are
-on by default. Each is only consulted where its layout uses it: the clock for the clock-less left
+The hook's switches live under **Sys → Android status bar**, together with its own status row, and
+are on by default. Each is only consulted where its layout uses it: the clock for the clock-less left
 side, the cluster and the privacy dot for the right-hand one. Switching one off leaves Android's own
 element in place - the pill then stops drawing its own battery / network glyphs, since it no longer
 replaced them. A key that was never written follows the layout, so an older installation behaves
@@ -139,8 +139,8 @@ hidden clock reports a right edge of `0` and the left-edge layout simply has not
 All of them are read by SystemUI from `Settings.Global` (writable only through root, which the app
 uses) and
 watched with a `ContentObserver`, so flipping a switch takes effect without a restart. The hook
-takes effect when SystemUI (re)loads, so the first time needs **Test tooling → Restart SystemUI**, and
-the module must be enabled for `com.android.systemui` in LSPosed. The **Xposed hook** row asks the hook itself: it publishes
+takes effect when SystemUI (re)loads, so the first time needs **Sys → SystemUI → Restart SystemUI**,
+and the module must be enabled for `com.android.systemui` in LSPosed. The **Xposed hook** row asks the hook itself: it publishes
 `Settings.Global → bbbar_hook_beat` (SystemUI holds `WRITE_SECURE_SETTINGS` here) every 30 s, and the
 row shows `loaded` when that heartbeat is fresh, `not loaded (last beat Ns ago)` when SystemUI
 restarted without the hook, and `off (kill switch)` when the file exists. A logcat attach line is
@@ -307,7 +307,7 @@ is waiting out `SCREEN_OFF_LOCK_DELAY_MS`.
 Both the loop and the alarm only repair a drop they did not cause: the service clears
 `wasConnected` on a *graceful* stop, so switching bbbar off in Accessibility stays off, and a crash
 (which never reaches `onDestroy`) leaves the flag set and gets repaired. The root loop also stands
-down while the **Pill enabled** master switch is off.
+down while the **Everything off** switch is on.
 
 ## What it shows
 
@@ -399,7 +399,7 @@ Every control writes into the shared `tuning` prefs the service watches, so edit
 screen instead of closing it: a sub-page returns to its tab, a side tab returns to Home, and only
 then does back leave the app.
 
-- **Home** — running/stopped with the reason, the master switch, the **preview** and the idle line.
+- **Home** — running/stopped with the reason, the **preview** and the idle line.
   The preview is not a mock-up: it is the pill itself, fed by `NowBarState.items()`, so it shows the
   card that is on the bar at this moment, in the same rank order, at the same sizes, and follows it
   within a second (a new track, a timer tick, a card swiped away). Tap it to see the expanded card,
@@ -412,15 +412,17 @@ then does back leave the app.
   battery / signal order. Its three placement buttons read **Right**, **Left** and **Left, no
   clock**; the caption under them spells out the difference. The pill in the shade / Quick
   Settings is the same one, at the same place, so there are no shade-specific controls.
-- **Activities** — the item switches (media, timers, alarms, live updates), the **ranking** list with
-  ▲/▼, notification access, the app exclusions, the status-bar hiding switches, and **simulate**: a
-  fake card of each kind drawn on the real pill, for judging a look without waiting for an activity.
+- **Items** — the item switches (media, timers, alarms, live updates), the **ranking** list with
+  ▲/▼, notification access, the app exclusions, and **simulate**: a fake card of each kind drawn on
+  the real pill, for judging a look without waiting for an activity.
+- **Sys** — the **Everything off** switch, the LSPosed hook (its state row and the three hiders for
+  the strip) and **Restart SystemUI**.
 - **Debug** — the plumbing (accessibility overlay, root watcher and its switch, fallback overlay,
-  notification access, hook state, screen and clock geometry, windows on screen) and the log level.
+  notification access, screen and clock geometry, windows on screen) and the log level.
 - **About** — version, package, repository link, and **Reset all settings**: confirm, then every
   stored value goes back to this build's defaults and the pill reloads.
 
-Turning the master switch off, or a surface off, takes effect immediately: the service removes that
+Turning **Sys → Everything off** on, or a surface off, takes effect immediately: the service removes that
 window at once instead of waiting for the next lock/unlock cycle, and switching it back on puts it up
 again.
 

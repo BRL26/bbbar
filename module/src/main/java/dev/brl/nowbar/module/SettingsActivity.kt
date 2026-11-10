@@ -78,6 +78,7 @@ class SettingsActivity : AppCompatActivity() {
         const val TAB_HOME = "home"
         const val TAB_LOOK = "look"
         const val TAB_ACTIVITIES = "activities"
+        const val TAB_SYS = "sys"
         const val TAB_DEBUG = "debug"
         const val TAB_ABOUT = "about"
 
@@ -224,7 +225,8 @@ class SettingsActivity : AppCompatActivity() {
         val tabs = listOf(
             TAB_HOME to "Home",
             TAB_LOOK to "Look",
-            TAB_ACTIVITIES to "Activities",
+            TAB_ACTIVITIES to "Items",
+            TAB_SYS to "Sys",
             TAB_DEBUG to "Debug",
             TAB_ABOUT to "About"
         )
@@ -243,7 +245,7 @@ class SettingsActivity : AppCompatActivity() {
                 minimumWidth = 0
                 insetTop = 0
                 insetBottom = 0
-                // Five tabs across the screen: Material's internal padding is the difference
+                // Six tabs across the screen: Material's internal padding is the difference
                 // between all of them fitting and the last one being clipped.
                 setPadding(0, dp(6), 0, dp(6))
                 setOnClickListener {
@@ -357,6 +359,7 @@ class SettingsActivity : AppCompatActivity() {
                 TAB_HOME -> homePage()
                 TAB_LOOK -> lookPage()
                 TAB_ACTIVITIES -> activitiesPage()
+                TAB_SYS -> sysPage()
                 TAB_DEBUG -> debugPage()
                 else -> aboutPage()
             }
@@ -443,8 +446,40 @@ class SettingsActivity : AppCompatActivity() {
     private fun activitiesPage() {
         itemsCard()
         rankCard()
-        androidBarCard()
         simulateCard()
+    }
+
+    /**
+     * Everything that reaches outside the app: the all-off switch, the LSPosed hook and the
+     * SystemUI restart it needs. Kept off the Home and Activities tabs, which are about the bar.
+     */
+    private fun sysPage() {
+        masterOffCard()
+        androidBarCard()
+        systemUiCard()
+    }
+
+    /**
+     * The all-off switch on its own card. On, it stops the bar and every helper; the accessibility
+     * permission is never touched - that grant is the app's, not a session's.
+     */
+    private fun masterOffCard() {
+        val body = card("All off", "The bar and every background helper")
+        masterSwitch = switchRow(
+            body,
+            "Everything off",
+            "Stops the pill, the root keeper, the keyguard log stream and the watchdog. The " +
+                "accessibility service stays enabled.",
+            !TuningStore.isOn(this, TuningStore.MASTER)
+        ) { off ->
+            prefs.edit().putBoolean(TuningStore.MASTER, !off).apply()
+            if (off) AllOff.off(this) else AllOff.on(this)
+        }
+        captionView(
+            body,
+            "The accessibility service and the notification access grant are system permissions, " +
+                "so they are left as they are: switching everything back on needs nothing else."
+        )
     }
 
     private fun debugPage() {
@@ -628,21 +663,11 @@ class SettingsActivity : AppCompatActivity() {
         heroTexts.addView(subtitle)
         hero.addView(heroTexts, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
 
-        masterSwitch = MaterialSwitch(this).apply {
-            isChecked = TuningStore.isOn(this@SettingsActivity, TuningStore.MASTER)
-            setOnCheckedChangeListener { _, on ->
-                prefs.edit().putBoolean(TuningStore.MASTER, on).apply()
-                if (on) AllOff.on(this@SettingsActivity) else AllOff.off(this@SettingsActivity)
-            }
-        }
-        hero.addView(masterSwitch, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
         body.addView(hero, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         captionView(
             body,
-            "Off stops the bar and everything bbbar runs in the background: the root keeper, the " +
-                "keyguard log stream and the watchdog. The accessibility permission stays as it " +
-                "is, so turning it back on needs nothing else. The switches for the service and " +
-                "the hook are under Debug."
+            "The all-off switch, the LSPosed hook and the SystemUI restart are on the Sys tab. " +
+                "The service and the notification access status are under Debug."
         )
     }
 
@@ -1094,8 +1119,9 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     /**
-     * The two things Android draws in the strip bbbar's pill uses. Both need the Xposed side, so
-     * the switches write Settings.Global through root, which SystemUI can read from inside.
+     * Everything the LSPosed hook owns: its own status row and the three hiders that go with the
+     * strip layout. The switches write Settings.Global through root, which SystemUI can read from
+     * inside.
      */
     private fun androidBarCard() {
         val body = card("Android status bar", "What Android draws where the pill sits")
@@ -1146,8 +1172,22 @@ class SettingsActivity : AppCompatActivity() {
         captionView(
             body,
             "Needs the bbbar module enabled for com.android.systemui in LSPosed, and one SystemUI " +
-                "restart after installing a new build - restart it from Debug. The hook writes a " +
-                "heartbeat every 30 s, which is what the row above follows."
+                "restart after installing a new build. The hook writes a heartbeat every 30 s, " +
+                "which is what the row above follows."
+        )
+    }
+
+    /** The hook lives in SystemUI, so a new build of the module only loads after a restart. */
+    private fun systemUiCard() {
+        val body = card("SystemUI", "Restart it to load a new hook build")
+        button(body, "Restart SystemUI") {
+            Thread { RootShell.run("killall com.android.systemui") }.start()
+            Toast.makeText(this, "SystemUI restarting", Toast.LENGTH_SHORT).show()
+        }
+        captionView(
+            body,
+            "The screen blanks for a second and everything on the strip comes back by itself. " +
+                "Nothing else needs restarting: the pill is an overlay and reloads on its own."
         )
     }
 
@@ -1289,18 +1329,13 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun toolingCard() {
-        val body = card("Tools", "For when a value needs a nudge or the hook needs a restart")
+        val body = card("Tools", "For when a value needs a nudge")
         button(body, "Open floating tuner") {
             try {
                 startForegroundService(Intent(this, TunerService::class.java))
             } catch (t: Throwable) {
                 Log.e("could not start tuner", t)
             }
-        }
-        // The hook lives in SystemUI, so it only picks up a new build after SystemUI restarts.
-        button(body, "Restart SystemUI") {
-            Thread { RootShell.run("killall com.android.systemui") }.start()
-            Toast.makeText(this, "SystemUI restarting", Toast.LENGTH_SHORT).show()
         }
         outlinedButtonOrButton(body, "Write the current tuning to the log") {
             sendBroadcast(
@@ -1894,7 +1929,8 @@ class SettingsActivity : AppCompatActivity() {
             state = if (overlay) "running" else "off"
         }
         overlaySwitch?.isChecked = overlay
-        masterSwitch?.isChecked = master
+        // The Sys switch reads the other way round: on means everything is stopped.
+        masterSwitch?.isChecked = !master
 
         val listening = listenerGranted()
         listenerStatus?.apply {
